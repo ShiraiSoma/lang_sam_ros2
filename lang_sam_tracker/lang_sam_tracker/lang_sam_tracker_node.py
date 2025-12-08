@@ -46,13 +46,7 @@ class LangSamTrackerNode(Node):
         self.det_inflight = False
 
         # I/O: 入力画像サブスク / 出力画像パブリッシュ
-        # 入力トピックをパラメータ化（既定値は ZED のカラー画像）
-        self.image_sub = self.create_subscription(
-            ROSImage,
-            self.image_topic,  # ← ここをパラメータから取得
-            self.image_callback,
-            1
-        )
+        self.image_sub = self.create_subscription(ROSImage, self.image_topic, self.image_callback, 1)
         self.image_detection_pub = self.create_publisher(ROSImage, '/image/lang_sam/detection', 1)
         self.image_tracking_pub = self.create_publisher(ROSImage, '/image/lang_sam/tracking', 1)
         self.tracks_pub = self.create_publisher(TrackArray, '/lang_sam/tracks', 1)
@@ -76,8 +70,7 @@ class LangSamTrackerNode(Node):
         self.declare_parameter('box_threshold', 0.3)
         self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('detection_interval_sec', 2.0)
-        # 画像入力トピック（既定値を ZED Wrapper に合わせる）
-        self.declare_parameter('image_topic', '/zed_node/rgb/image_rect_color')
+        self.declare_parameter('image_topic', '/camera/image_raw')
 
         # KLT(LK光学フロー)のROSパラメータ
         # - 窓サイズ、ピラミッド段数、収束条件、最低存続点数
