@@ -7,8 +7,8 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     # パラメータファイルのパスを取得
-    lang_sam_tracker_dir = get_package_share_directory('lang_sam_tracker')
-    params_file = os.path.join(lang_sam_tracker_dir, 'config', 'params.yaml')
+    lang_sam_executor_dir = get_package_share_directory('lang_sam_executor')
+    params_file = os.path.join(lang_sam_executor_dir, 'config', 'params.yaml')
 
     # LangSAM Trackerノードの起動設定
     lang_sam_tracker_node = Node(
@@ -16,12 +16,19 @@ def generate_launch_description():
         executable='lang_sam_tracker_node.py',
         name='lang_sam_tracker',
         output='screen',
-        remappings=[
-            ('/camera/image_raw', '/zed/zed_node/rgb/image_rect_color')
-        ],
+        parameters=[params_file]
+    )
+
+    # LangSAM Person Followingノードの起動設定
+    lang_sam_person_following_node = Node(
+        package='lang_sam_person_following',
+        executable='lang_sam_person_following_node',
+        name='lang_sam_person_following',
+        output='screen',
         parameters=[params_file]
     )
 
     return LaunchDescription([
-        lang_sam_tracker_node
+        lang_sam_tracker_node,
+        lang_sam_person_following_node
     ])

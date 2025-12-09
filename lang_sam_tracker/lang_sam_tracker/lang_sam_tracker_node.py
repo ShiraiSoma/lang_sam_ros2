@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from rclpy.duration import Duration
-from rclpy.time import Time
 from sensor_msgs.msg import Image as ROSImage
 
 from cv_bridge import CvBridge
@@ -10,10 +8,13 @@ from PIL import Image as PILImage
 import torch
 import numpy as np
 import cv2
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from lang_sam import LangSAM
 from lang_sam.utils import draw_image  # 可視化ユーティリティ
 from lang_sam.models.utils import DEVICE  # 推論デバイス（cuda/cpu取得）
+from lang_sam_msgs.msg import TrackArray, Track # カスタムメッセージ
 
 class LangSamTrackerNode(Node):
     def __init__(self):
@@ -34,28 +35,31 @@ class LangSamTrackerNode(Node):
         self.bridge = CvBridge()
 
         # KLTトラッキング状態
-        # tracks: 各トラックの状態を辞書で保持
-        #  - points: KLT特徴点 (N,1,2) float32
-        #  - box:    推定bbox [x1,y1,x2,y2]（KLT点のmin/maxから更新）
-        #  - mask:   特徴点の凸包から再構成したboolマスク（可視化用）
-        #  - label/score: 可視化の補助情報
         self.tracks = []
-        self.prev_gray = None     # 直前のグレースケール（KLT入力）
+        self.prev_gray = None
         self.next_track_id = 0
+        self.latest_bgr = None  # タイマー検出用に最新フレームを保持
 
-        # 最終検出時刻（検出間隔secを満たしたらLangSAM再実行）
-        self.last_detection_time: Time | None = None
+        # 共有状態ロックと検出用スレッドプール
+        self.state_lock = threading.Lock()
+        self.detector_pool = ThreadPoolExecutor(max_workers=1)
+        self.det_inflight = False
 
         # I/O: 入力画像サブスク / 出力画像パブリッシュ
-        self.image_sub = self.create_subscription(ROSImage, '/camera/image_raw', self.image_callback, 1)
+        self.image_sub = self.create_subscription(ROSImage, self.image_topic, self.image_callback, 1)
         self.image_detection_pub = self.create_publisher(ROSImage, '/image/lang_sam/detection', 1)
         self.image_tracking_pub = self.create_publisher(ROSImage, '/image/lang_sam/tracking', 1)
+        self.tracks_pub = self.create_publisher(TrackArray, '/lang_sam/tracks', 1)
+
+        # 検出はタイマーで実行（detection_interval_secを周期として使用）
+        self.detection_timer = self.create_timer(float(self.detection_interval_sec), self.timer_callback)
 
         # ログ
         self.get_logger().info(f'Using device: {self.device}')
         self.get_logger().info(f'Using SAM model: {self.sam_model}')
         self.get_logger().info(f'Using text prompt: {self.text_prompt}')
         self.get_logger().info(f'Detection interval (sec): {self.detection_interval_sec}')
+        self.get_logger().info(f'Image topic: {self.image_topic}')
         self.get_logger().info('LangSAM model initialized.')
 
     # パラメータ取得用の関数
@@ -66,12 +70,40 @@ class LangSamTrackerNode(Node):
         self.declare_parameter('box_threshold', 0.3)
         self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('detection_interval_sec', 2.0)
+        self.declare_parameter('image_topic', '/camera/image_raw')
+
+        # KLT(LK光学フロー)のROSパラメータ
+        # - 窓サイズ、ピラミッド段数、収束条件、最低存続点数
+        self.declare_parameter('klt_win_size', [15, 15])      # integer_array [w, h]
+        self.declare_parameter('klt_max_level', 3)            # integer
+        self.declare_parameter('klt_criteria_count', 30)      # integer
+        self.declare_parameter('klt_criteria_eps', 0.03)      # double
+        self.declare_parameter('klt_min_points', 5)           # integer: 維持すべき最小追跡点数
+
+        # GFTT(Shi-Tomasi)のROSパラメータ
+        self.declare_parameter('gftt_max_corners', 120)       # integer
+        self.declare_parameter('gftt_quality_level', 0.01)    # double
+        self.declare_parameter('gftt_min_distance', 3.0)      # double(画素)
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
         self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
         self.box_threshold = self.get_parameter('box_threshold').get_parameter_value().double_value
         self.text_threshold = self.get_parameter('text_threshold').get_parameter_value().double_value
         self.detection_interval_sec = self.get_parameter('detection_interval_sec').get_parameter_value().double_value
+        self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+
+        # KLTパラメータの取得と整形
+        ws = self.get_parameter('klt_win_size').get_parameter_value().integer_array_value
+        self.klt_win_size = (int(ws[0]), int(ws[1])) if len(ws) >= 2 else (15, 15)
+        self.klt_max_level = int(self.get_parameter('klt_max_level').get_parameter_value().integer_value)
+        self.klt_criteria_count = int(self.get_parameter('klt_criteria_count').get_parameter_value().integer_value)
+        self.klt_criteria_eps = float(self.get_parameter('klt_criteria_eps').get_parameter_value().double_value)
+        self.klt_min_points = int(self.get_parameter('klt_min_points').get_parameter_value().integer_value)
+
+        # GFTTパラメータの取得
+        self.gftt_max_corners = int(self.get_parameter('gftt_max_corners').get_parameter_value().integer_value)
+        self.gftt_quality_level = float(self.get_parameter('gftt_quality_level').get_parameter_value().double_value)
+        self.gftt_min_distance = float(self.get_parameter('gftt_min_distance').get_parameter_value().double_value)
 
     def _init_tracks_from_detections(self, cv_image, boxes, labels, scores, masks_bool):
         # 検出結果からトラック群を初期化
@@ -89,17 +121,16 @@ class LangSamTrackerNode(Node):
                 continue
             mask_uint8 = (masks_bool[i].astype(np.uint8)) * 255  # goodFeaturesToTrackがuint8マスクを要求
 
-            # Shi-Tomasiコーナーをマスク内から抽出（KLT初期特徴点）
-            # maxCorners/qualityLevel/minDistanceは対象サイズや速度に応じて調整可能
+            # GFTTパラメータをROSから取得した値で適用
             pts = cv2.goodFeaturesToTrack(
                 image=gray,
-                maxCorners=120,
-                qualityLevel=0.01,
-                minDistance=3,
+                maxCorners=self.gftt_max_corners,
+                qualityLevel=self.gftt_quality_level,
+                minDistance=self.gftt_min_distance,
                 mask=mask_uint8
             )
-            # 特徴点が少なすぎるとKLTのドリフト/破綻が起きやすいので破棄
-            if pts is None or pts.shape[0] < 5:
+            # 最低点数をROSパラメータで判定
+            if pts is None or pts.shape[0] < self.klt_min_points:
                 continue
 
             track = {
@@ -131,11 +162,13 @@ class LangSamTrackerNode(Node):
             return
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
         new_tracks = []
-        # KLTパラメータ: 探索窓(winSize), ピラミッド段数(maxLevel), 収束条件(criteria)
+        # KLTパラメータをROSから取得した値で適用
         lk_params = dict(
-            winSize=(15, 15),
-            maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03)
+            winSize=tuple(map(int, self.klt_win_size)),
+            maxLevel=int(self.klt_max_level),
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                      int(self.klt_criteria_count),
+                      float(self.klt_criteria_eps))
         )
         h, w = gray.shape
         for track in self.tracks:
@@ -144,11 +177,11 @@ class LangSamTrackerNode(Node):
             if new_pts is None or st is None:
                 continue
 
-            # 追跡成功点のみ抽出し、以降の計算を安定化
+            # 追跡成功点のみ抽出
             st_flat = st.flatten().astype(bool)
             good = new_pts[st_flat]
 
-            # OpenCVの返却形状差を吸収して(N,2)へ正規化（防御的キャスト）
+            # 形状を(N,2)に正規化
             if good.ndim == 3 and good.shape[1] == 1 and good.shape[2] == 2:
                 good_xy = good[:, 0, :]
             elif good.ndim == 2 and good.shape[1] == 2:
@@ -159,8 +192,8 @@ class LangSamTrackerNode(Node):
                 except Exception:
                     continue
 
-            # 点が少ない場合はドリフト/破綻しやすいので破棄
-            if good_xy.shape[0] < 5:
+            # 最低点数をROSパラメータで判定
+            if good_xy.shape[0] < self.klt_min_points:
                 continue
 
             # bboxは特徴点のmin/maxから更新（画像境界でクリップ）
@@ -186,24 +219,81 @@ class LangSamTrackerNode(Node):
     def image_callback(self, msg):
         # 入力: ROS Image -> OpenCV(BGR)
         cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        # タイマー検出用に最新フレームを保持
+        self.latest_bgr = cv_image
 
-        # 検出再実行の判定（nodeのClock基準、秒ベース）
-        now = self.get_clock().now()
-        need_detection = False
-        if self.last_detection_time is None:
-            need_detection = True
-        else:
-            if (now - self.last_detection_time) >= Duration(seconds=float(self.detection_interval_sec)):
-                need_detection = True
+        # KLT更新は共有状態を保護
+        with self.state_lock:
+            self._update_tracks_with_klt(cv_image)
+            # 可視化用にスナップショットを作る（ロック時間を短くするため必要最小限をコピー）
+            if self.tracks:
+                boxes_for_draw = np.asarray([t['box'] for t in self.tracks], dtype=np.int32)
+                labels_for_draw = [t['label'] for t in self.tracks]
+                scores_for_draw = np.asarray([t['score'] for t in self.tracks], dtype=np.float32)
+                masks_for_draw = np.asarray([t['mask'] for t in self.tracks], dtype=bool)
+            else:
+                h, w, _ = cv_image.shape
+                boxes_for_draw = np.zeros((0, 4), dtype=np.int32)
+                labels_for_draw = []
+                scores_for_draw = np.zeros((0,), dtype=np.float32)
+                masks_for_draw = np.zeros((0, h, w), dtype=bool)
 
-        if need_detection:
-            # 検出フレーム: LangSAM推論（PIL RGBに変換して入力）
+        pil_base = PILImage.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+        try:
+            track_image_pil = draw_image(
+                image_rgb=pil_base,
+                masks=masks_for_draw,
+                xyxy=boxes_for_draw,
+                probs=scores_for_draw,
+                labels=labels_for_draw,
+            )
+        except Exception as e:
+            self.get_logger().warn(f'draw_image失敗(tracking): {e}')
+            return
+
+        track_image_cv = cv2.cvtColor(np.array(track_image_pil), cv2.COLOR_RGB2BGR)
+        track_msg = self.bridge.cv2_to_imgmsg(track_image_cv, encoding='bgr8')
+        self.image_tracking_pub.publish(track_msg)
+
+        # トラック情報を/custom_msgs/TrackArrayで配信
+        msg_tracks = TrackArray()
+        msg_tracks.header.stamp = self.get_clock().now().to_msg()
+        msg_tracks.header.frame_id = 'camera'
+        with self.state_lock:
+            for t in self.tracks:
+                tr = Track()
+                tr.id = int(t['id'])
+                tr.label = str(t['label'])
+                tr.score = float(t['score'])
+                x1, y1, x2, y2 = t['box']
+                tr.x_min = int(x1); tr.y_min = int(y1)
+                tr.x_max = int(x2); tr.y_max = int(y2)
+                msg_tracks.tracks.append(tr)
+        self.tracks_pub.publish(msg_tracks)
+
+    def timer_callback(self):
+        # 最新フレームがなければスキップ
+        if self.latest_bgr is None:
+            return
+        # 既にバックグラウンド推論が走っていれば重複起動しない
+        if self.det_inflight:
+            return
+
+        frame = self.latest_bgr.copy()
+        self.det_inflight = True
+        # バックグラウンドで推論・描画・トラック初期化
+        self.detector_pool.submit(self._run_detection_job, frame)
+
+    def _run_detection_job(self, cv_image):
+        try:
             pil_image = PILImage.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
             with torch.no_grad():
+                # 元の重い処理（GPU/CPU同期もここで実施）
                 results = self.model.predict([pil_image], [self.text_prompt])
+
             det = results[0]
 
-            # boxes/masks/scores/labelsをnumpyへ正規化（空でも次工程のshapeが破綻しないように）
+            # boxes/masks/scores/labels を numpy に正規化
             boxes = det.get('boxes', None)
             if boxes is None:
                 boxes_np = np.zeros((0, 4), dtype=np.float32)
@@ -220,7 +310,6 @@ class LangSamTrackerNode(Node):
                 if hasattr(masks, 'cpu'):
                     masks = masks.cpu().numpy()
                 masks_np = np.asarray(masks)
-                # (N,1,H,W)->(N,H,W) などに整形し、boolへキャスト
                 if masks_np.ndim == 4 and masks_np.shape[1] == 1:
                     masks_np = masks_np[:, 0]
                 if masks_np.ndim == 3:
@@ -242,72 +331,43 @@ class LangSamTrackerNode(Node):
                     scores = scores.cpu().numpy()
                 scores_np = np.asarray(scores, dtype=np.float32).reshape(-1)
 
-            # 検出結果を可視化して/detectionにパブリッシュ
+            # 検出可視化を配信（別スレッドからpublishしてOK）
             det_image_pil = draw_image(
-                image_rgb=pil_image,      # PIL RGB
-                masks=masks_np,           # (N,H,W) bool
-                xyxy=boxes_np,            # (N,4) float32
-                probs=scores_np,          # (N,) float32
-                labels=labels_det,        # list[str]
+                image_rgb=pil_image,
+                masks=masks_np,
+                xyxy=boxes_np,
+                probs=scores_np,
+                labels=labels_det,
             )
             det_image_cv = cv2.cvtColor(np.array(det_image_pil), cv2.COLOR_RGB2BGR)
             det_msg = self.bridge.cv2_to_imgmsg(det_image_cv, encoding='bgr8')
             self.image_detection_pub.publish(det_msg)
 
-            # 検出マスクを用いてKLT初期点を生成し、トラックを初期化
-            self._init_tracks_from_detections(
-                cv_image,
-                boxes_np.tolist(),
-                labels_det,
-                scores_np.tolist(),
-                masks_np
-            )
-            self.last_detection_time = now
-        else:
-            # トラッキングフレーム: KLTで特徴点を更新し、凸包マスクを再構成
-            self._update_tracks_with_klt(cv_image)
-
-        # 毎フレーム、トラッキング結果を/trackingに可視化・配信
-        if self.tracks:
-            # numpy配列に正規化（draw_imageはnp.ndarray想定）
-            boxes_for_draw = np.asarray([t['box'] for t in self.tracks], dtype=np.int32)       # (N,4)
-            labels_for_draw = [t['label'] for t in self.tracks]                                 # list[str]
-            scores_for_draw = np.asarray([t['score'] for t in self.tracks], dtype=np.float32)   # (N,)
-            masks_for_draw = np.asarray([t['mask'] for t in self.tracks], dtype=bool)           # (N,H,W)
-        else:
-            # 空でもshapeを満たすダミー配列を渡す（utils側のshape検証回避）
-            h, w, _ = cv_image.shape
-            boxes_for_draw = np.zeros((0, 4), dtype=np.int32)
-            labels_for_draw = []
-            scores_for_draw = np.zeros((0,), dtype=np.float32)
-            masks_for_draw = np.zeros((0, h, w), dtype=bool)
-
-        # 背景は現フレーム（RGB）
-        pil_base = PILImage.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
-        try:
-            track_image_pil = draw_image(
-                image_rgb=pil_base,
-                masks=masks_for_draw,   # KLT再構成マスク（bool, (N,H,W)）
-                xyxy=boxes_for_draw,    # (N,4)
-                probs=scores_for_draw,  # (N,)
-                labels=labels_for_draw, # list[str]
-            )
+            # 検出からトラック初期化（共有状態をロック）
+            with self.state_lock:
+                self._init_tracks_from_detections(
+                    cv_image,
+                    boxes_np.tolist(),
+                    labels_det,
+                    scores_np.tolist(),
+                    masks_np
+                )
         except Exception as e:
-            # 型・shape不一致等の可視化例外をログ化（処理はスキップ）
-            self.get_logger().warn(f'draw_image失敗(tracking): {e}')
-            return
-
-        # PIL(RGB) -> OpenCV(BGR) -> ROS Image
-        track_image_cv = cv2.cvtColor(np.array(track_image_pil), cv2.COLOR_RGB2BGR)
-        track_msg = self.bridge.cv2_to_imgmsg(track_image_cv, encoding='bgr8')
-        self.image_tracking_pub.publish(track_msg)
+            self.get_logger().error(f'バックグラウンド検出で例外: {e}')
+        finally:
+            self.det_inflight = False
 
 
-def main():
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
     node = LangSamTrackerNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
