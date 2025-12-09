@@ -4,7 +4,8 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <lang_sam_msgs/msg/track_array.hpp>
 
-class FollowPersonNode : public rclcpp::Node {
+class FollowPersonNode : public rclcpp::Node
+{
 public:
   FollowPersonNode();
 
