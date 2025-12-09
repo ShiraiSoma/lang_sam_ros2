@@ -8,18 +8,9 @@
 #### 概要（後日修正予定）
 下図左は LangSAM の出力，右はそのマスクをKLTトラッカーでトラッキングした出力です．
 
-<div align="center">
-  <table>
-    <tr>
-      <td><img src="./doc/lang_sam_mask.gif" alt="LangSAM 出力" height="200"></td>
-      <td><img src="./doc/optical_flow.gif" alt="Optical Flow 出力" height="200"></td>
-    </tr>
-    <tr>
-      <td align="center"><b>LangSAMによる検出<br>text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."</b></td>
-      <td align="center"><b>KLTトラッカーによる追跡<br>tracking_targets: "white line. human. red pylon. car. mobility."</b></td>
-    </tr>
-  </table>
-</div>
+<p align="center">
+  <img src="doc/si2025_dev.gif" alt="lang_sam_dev" />
+</p>
 
 
 ---
