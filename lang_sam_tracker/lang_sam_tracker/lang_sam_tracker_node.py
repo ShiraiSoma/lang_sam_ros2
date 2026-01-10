@@ -145,15 +145,31 @@ class LangSamTrackerNode(Node):
             self.next_track_id += 1
 
     def _mask_from_points(self, points, shape):
-        # KLT更新後の特徴点群から凸包を生成し、それを塗りつぶしてマスクを再構成
-        # points: (M,1,2)、shape: (H,W)
-        if points is None or points.shape[0] < 3:
-            # 凸包が作れない（点が少ない）場合は空マスク
+        # KLT更新後の特徴点群から各特徴点をそのまま描画してマスクを再構成
+        # points: (M,1,2) または (M,2)、shape: (H,W)
+        if points is None:
             return np.zeros(shape, dtype=bool)
-        pts_2d = points.reshape(-1, 2)
-        hull = cv2.convexHull(pts_2d.astype(np.float32))  # 凸包頂点
+
+        # 正規化して (N,2) 形状にする
+        try:
+            pts = points.reshape(-1, 2)
+        except Exception:
+            return np.zeros(shape, dtype=bool)
+
+        if pts.shape[0] < 1:
+            return np.zeros(shape, dtype=bool)
+
         mask = np.zeros(shape, dtype=np.uint8)
-        cv2.fillConvexPoly(mask, hull.astype(int), 255)   # 凸包内部を塗りつぶし
+        # 点を描画する半径（ピクセル）。必要ならパラメータ化可能。
+        radius = 5
+        thickness = -1  # 塗りつぶし
+        for (x_f, y_f) in pts:
+            x = int(np.round(x_f))
+            y = int(np.round(y_f))
+            # 画像境界内のみ描画
+            if 0 <= x < shape[1] and 0 <= y < shape[0]:
+                cv2.circle(mask, (x, y), radius, 255, thickness)
+
         return mask.astype(bool)
 
     def _update_tracks_with_klt(self, cv_image):
