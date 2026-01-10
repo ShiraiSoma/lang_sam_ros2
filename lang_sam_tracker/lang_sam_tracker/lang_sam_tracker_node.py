@@ -10,6 +10,7 @@ import numpy as np
 import cv2
 import threading
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 from lang_sam import LangSAM
 from lang_sam.utils import draw_image  # 可視化ユーティリティ
@@ -47,9 +48,23 @@ class LangSamTrackerNode(Node):
 
         # I/O: 入力画像サブスク / 出力画像パブリッシュ
         self.image_sub = self.create_subscription(ROSImage, self.image_topic, self.image_callback, 1)
-        self.image_detection_pub = self.create_publisher(ROSImage, '/image/lang_sam/detection', 1)
-        self.image_tracking_pub = self.create_publisher(ROSImage, '/image/lang_sam/tracking', 1)
+        # ...既存のトピックパブリッシャー作成は削除: image_detection_pub / image_tracking_pub は使用しない...
         self.tracks_pub = self.create_publisher(TrackArray, '/lang_sam/tracks', 1)
+
+        # 可視化用共有イメージ（検出スレッド -> 表示）
+        self.latest_det_vis = None  # OpenCV BGR image or None
+
+        # 表示FPS用（トラッキング）
+        # トラッキングFPS計測
+        self.track_last_time = time.time()
+        self.track_fps = 0.0
+
+        # 平滑化係数 (EMA) を両方で共通化
+        self.fps_alpha = 0.1
+        # --- 追加: 検出(FPS)用の状態変数 ---
+        self.det_last_time = None
+        self.det_fps = 0.0
+        # --- ここまで追加 ---
 
         # 検出はタイマーで実行（detection_interval_secを周期として使用）
         self.detection_timer = self.create_timer(float(self.detection_interval_sec), self.timer_callback)
@@ -268,10 +283,87 @@ class LangSamTrackerNode(Node):
             return
 
         track_image_cv = cv2.cvtColor(np.array(track_image_pil), cv2.COLOR_RGB2BGR)
-        track_msg = self.bridge.cv2_to_imgmsg(track_image_cv, encoding='bgr8')
-        self.image_tracking_pub.publish(track_msg)
 
-        # トラック情報を/custom_msgs/TrackArrayで配信
+        # --- ここからOpenCV表示処理: 検出可視化と追跡可視化を横並びで表示（FPSを描画） ---
+        # トラッキングFPS更新（image_callback の呼び出し周期を利用）
+        now = time.time()
+        dt = now - self.track_last_time if hasattr(self, 'track_last_time') else 0.0
+        if dt > 1e-6:
+            inst_fps = 1.0 / dt
+            # EMAで安定化（共通係数を使用）
+            self.track_fps = (1.0 - self.fps_alpha) * self.track_fps + self.fps_alpha * inst_fps if self.track_fps > 0 else inst_fps
+        self.track_last_time = now
+
+        # 検出可視化をスレッドセーフに取得（同時にdet_fpsも読み出す）
+        with self.state_lock:
+            det_vis = None if self.latest_det_vis is None else self.latest_det_vis.copy()
+            det_fps = float(self.det_fps)
+
+        # 検出画像がない場合は空白を作る
+        if det_vis is None:
+            h_t, w_t, _ = track_image_cv.shape
+            det_vis = np.zeros((h_t, w_t, 3), dtype=np.uint8)
+            cv2.putText(det_vis, 'No detection yet', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+
+        # --- 追加: 検出FPSをdet_vis上に描画（スタイルを統一） ---
+        try:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale_det = max(0.6, det_vis.shape[1] / 1000.0)
+            thickness_det = 2
+            det_text = f'FPS: {det_fps:.1f}'
+            (tw, th), _ = cv2.getTextSize(det_text, font, font_scale_det, thickness_det)
+            x_det = max(10, det_vis.shape[1] - 10 - tw)  # 右端に寄せ、最小余白を確保
+            y_det = 10 + th  # 上から少し下げて描画
+            cv2.putText(det_vis, det_text, (x_det, y_det), font, font_scale_det, (0, 255, 255), thickness_det, cv2.LINE_AA)
+        except Exception:
+            pass
+        # --- ここまで追加 ---
+
+        # --- 追加: トラッキングFPSをtrack_image_cv上に描画（同じスタイル） ---
+        try:
+            font_scale_trk = max(0.6, track_image_cv.shape[1] / 1000.0)
+            thickness_trk = 2
+            trk_text = f'FPS: {self.track_fps:.1f}'
+            (tw_t, th_t), _ = cv2.getTextSize(trk_text, font, font_scale_trk, thickness_trk)
+            x_trk = max(10, track_image_cv.shape[1] - 10 - tw_t)
+            y_trk = 10 + th_t
+            cv2.putText(track_image_cv, trk_text, (x_trk, y_trk), font, font_scale_trk, (0, 255, 255), thickness_trk, cv2.LINE_AA)
+        except Exception:
+            pass
+        # --- ここまで追加 ---
+
+        # サイズ合わせ（高さを基準に揃える）
+        h_det, w_det, _ = det_vis.shape
+        h_trk, w_trk, _ = track_image_cv.shape
+        if h_det != h_trk:
+            scale = h_trk / h_det
+            new_w = int(w_det * scale)
+            det_vis = cv2.resize(det_vis, (new_w, h_trk))
+            w_det = new_w
+
+        # 横並び合成（左右にラベル）
+        combined = np.hstack([det_vis, track_image_cv])
+
+        # ラベル描画: 左=Detection, 右=Tracking
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = max(0.6, combined.shape[1] / 1000.0)
+        thickness = 2
+        # Detectionラベル位置
+        cv2.putText(combined, 'Detection', (10, 30), font, font_scale, (0, 255, 0), thickness, cv2.LINE_AA)
+        # Trackingラベル位置（右側の画像の左端を計算）
+        x_right = det_vis.shape[1] + 10
+        cv2.putText(combined, 'Tracking', (x_right, 30), font, font_scale, (0, 255, 0), thickness, cv2.LINE_AA)
+        # FPS描画（右上）
+        # fps_text = f'FPS: {self.fps:.1f}'
+        # cv2.putText(combined, fps_text, (combined.shape[1] - 200, 30), font, font_scale, (0, 255, 255), thickness, cv2.LINE_AA)
+        # （注）個別画像上にFPSを描画済みのため、合成後の汎用FPS描画は不要
+
+        # 非ブロッキング表示
+        cv2.imshow('LangSAM', combined)
+        cv2.waitKey(1)
+        # --- 表示処理ここまで ---
+
+        # トラック情報を/custom_msgs/TrackArrayで配信（既存）
         msg_tracks = TrackArray()
         msg_tracks.header.stamp = self.get_clock().now().to_msg()
         msg_tracks.header.frame_id = 'camera'
@@ -347,7 +439,7 @@ class LangSamTrackerNode(Node):
                     scores = scores.cpu().numpy()
                 scores_np = np.asarray(scores, dtype=np.float32).reshape(-1)
 
-            # 検出可視化を配信（別スレッドからpublishしてOK）
+            # 検出可視化を作成（以前はpublishしていた）
             det_image_pil = draw_image(
                 image_rgb=pil_image,
                 masks=masks_np,
@@ -356,8 +448,22 @@ class LangSamTrackerNode(Node):
                 labels=labels_det,
             )
             det_image_cv = cv2.cvtColor(np.array(det_image_pil), cv2.COLOR_RGB2BGR)
-            det_msg = self.bridge.cv2_to_imgmsg(det_image_cv, encoding='bgr8')
-            self.image_detection_pub.publish(det_msg)
+
+            # --- 追加: 検出完了時刻でdet_fpsを更新（スレッドセーフ、共通alphaを使用） ---
+            now = time.time()
+            with self.state_lock:
+                if self.det_last_time is not None:
+                    dt = now - self.det_last_time
+                    if dt > 1e-6:
+                        inst_fps = 1.0 / dt
+                        self.det_fps = (1.0 - self.fps_alpha) * self.det_fps + self.fps_alpha * inst_fps if self.det_fps > 0 else inst_fps
+                self.det_last_time = now
+            # --- ここまで追加 ---
+
+            # --- 検出可視化を共有変数に保存（スレッドセーフ） ---
+            with self.state_lock:
+                self.latest_det_vis = det_image_cv.copy()
+            # --- ここまで ---
 
             # 検出からトラック初期化（共有状態をロック）
             with self.state_lock:
@@ -383,6 +489,11 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
+        # OpenCV ウィンドウを破棄
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
         rclpy.shutdown()
 
 if __name__ == '__main__':
