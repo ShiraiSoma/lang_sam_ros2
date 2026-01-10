@@ -13,12 +13,12 @@ lang_sam_tracker:
     klt_max_level: 5              # ピラミッド段数。大きい動き対応↑/計算増。2〜4推奨
     klt_criteria_count: 30        # 反復上限。ノイズ多い/収束悪い→↑(20〜50)
     klt_criteria_eps: 0.005        # 収束許容誤差。小さいほど精密/遅い。0.01〜0.05目安
-    klt_min_points: 15             # トラック維持の最低特徴点数。破綻防止。5〜20で調整
+    klt_min_points: 5             # トラック維持の最低特徴点数。破綻防止。5〜20で調整
 
     # GFTT (Shi-Tomasi)
-    gftt_max_corners: 100         # 初期/再サンプル時の最大特徴点数。↑で安定/計算増。小物:80〜150、大きいシーン:150〜300
-    gftt_quality_level: 0.05      # 0〜1の品質閾値。↓で点が増えるがノイズも増。0.005〜0.02で調整
-    gftt_min_distance: 10.0        # 特徴点間の最小距離(px)。↓で密/重複↑、↑で疎/安定。3〜10目安
+    gftt_max_corners: 300         # 初期/再サンプル時の最大特徴点数。↑で安定/計算増。小物:80〜150、大きいシーン:150〜300
+    gftt_quality_level: 0.005      # 0〜1の品質閾値。↓で点が増えるがノイズも増。0.005〜0.02で調整
+    gftt_min_distance: 3.0        # 特徴点間の最小距離(px)。↓で密/重複↑、↑で疎/安定。3〜10目安
 
 lang_sam_person_following:
   ros__parameters:
