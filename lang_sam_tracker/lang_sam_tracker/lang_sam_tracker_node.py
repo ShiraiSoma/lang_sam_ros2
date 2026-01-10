@@ -44,7 +44,8 @@ class LangSamTrackerNode(Node):
         # 共有状態ロックと検出用スレッドプール
         self.state_lock = threading.Lock()
         self.detector_pool = ThreadPoolExecutor(max_workers=1)
-        self.det_inflight = False
+        # バックグラウンド検出の状態: None または Future
+        self.det_future = None
 
         # I/O: 入力画像サブスク / 出力画像パブリッシュ
         self.image_sub = self.create_subscription(ROSImage, self.image_topic, self.image_callback, 1)
@@ -61,10 +62,8 @@ class LangSamTrackerNode(Node):
 
         # 平滑化係数 (EMA) を両方で共通化
         self.fps_alpha = 0.1
-        # --- 追加: 検出(FPS)用の状態変数 ---
         self.det_last_time = None
         self.det_fps = 0.0
-        # --- ここまで追加 ---
 
         # 検出はタイマーで実行（detection_interval_secを周期として使用）
         self.detection_timer = self.create_timer(float(self.detection_interval_sec), self.timer_callback)
@@ -119,6 +118,35 @@ class LangSamTrackerNode(Node):
         self.gftt_max_corners = int(self.get_parameter('gftt_max_corners').get_parameter_value().integer_value)
         self.gftt_quality_level = float(self.get_parameter('gftt_quality_level').get_parameter_value().double_value)
         self.gftt_min_distance = float(self.get_parameter('gftt_min_distance').get_parameter_value().double_value)
+
+    # --- tensor/torch -> numpy 変換 ---
+    def _to_numpy(self, x):
+        if x is None:
+            return None
+        if hasattr(x, 'cpu'):
+            try:
+                x = x.cpu().numpy()
+            except Exception:
+                # 非 tensor オブジェクトなどをそのまま配列化
+                pass
+        return np.asarray(x)
+
+    # --- EMA による FPS 更新の共通処理 ---
+    def _update_ema_fps(self, now, last_name, fps_name):
+        last = getattr(self, last_name, None)
+        fps = getattr(self, fps_name, 0.0)
+        if last is None:
+            setattr(self, last_name, now)
+            if fps == 0.0:
+                setattr(self, fps_name, 0.0)
+            return getattr(self, fps_name)
+        dt = now - last
+        if dt > 1e-6:
+            inst = 1.0 / dt
+            new = (1.0 - self.fps_alpha) * fps + self.fps_alpha * inst if fps > 0 else inst
+            setattr(self, fps_name, new)
+        setattr(self, last_name, now)
+        return getattr(self, fps_name)
 
     def _init_tracks_from_detections(self, cv_image, boxes, labels, scores, masks_bool):
         # 検出結果からトラック群を初期化
@@ -279,20 +307,16 @@ class LangSamTrackerNode(Node):
                 labels=labels_for_draw,
             )
         except Exception as e:
-            self.get_logger().warn(f'draw_image失敗(tracking): {e}')
+            self.get_logger().warning(f'draw_image失敗(tracking): {e}')
             return
 
         track_image_cv = cv2.cvtColor(np.array(track_image_pil), cv2.COLOR_RGB2BGR)
 
-        # --- ここからOpenCV表示処理: 検出可視化と追跡可視化を横並びで表示（FPSを描画） ---
+        # --- 検出可視化と追跡可視化を横並びで表示（FPSを描画） ---
         # トラッキングFPS更新（image_callback の呼び出し周期を利用）
         now = time.time()
-        dt = now - self.track_last_time if hasattr(self, 'track_last_time') else 0.0
-        if dt > 1e-6:
-            inst_fps = 1.0 / dt
-            # EMAで安定化（共通係数を使用）
-            self.track_fps = (1.0 - self.fps_alpha) * self.track_fps + self.fps_alpha * inst_fps if self.track_fps > 0 else inst_fps
-        self.track_last_time = now
+        # 共通ヘルパーでトラックFPSを更新
+        self._update_ema_fps(now, 'track_last_time', 'track_fps')
 
         # 検出可視化をスレッドセーフに取得（同時にdet_fpsも読み出す）
         with self.state_lock:
@@ -305,7 +329,7 @@ class LangSamTrackerNode(Node):
             det_vis = np.zeros((h_t, w_t, 3), dtype=np.uint8)
             cv2.putText(det_vis, 'No detection yet', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
 
-        # --- 追加: 検出FPSをdet_vis上に描画（スタイルを統一） ---
+        # --- 検出FPSをdet_vis上に描画（スタイルを統一） ---
         try:
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale_det = max(0.6, det_vis.shape[1] / 1000.0)
@@ -317,9 +341,8 @@ class LangSamTrackerNode(Node):
             cv2.putText(det_vis, det_text, (x_det, y_det), font, font_scale_det, (0, 255, 255), thickness_det, cv2.LINE_AA)
         except Exception:
             pass
-        # --- ここまで追加 ---
 
-        # --- 追加: トラッキングFPSをtrack_image_cv上に描画（同じスタイル） ---
+        # --- トラッキングFPSをtrack_image_cv上に描画（同じスタイル） ---
         try:
             font_scale_trk = max(0.6, track_image_cv.shape[1] / 1000.0)
             thickness_trk = 2
@@ -330,7 +353,6 @@ class LangSamTrackerNode(Node):
             cv2.putText(track_image_cv, trk_text, (x_trk, y_trk), font, font_scale_trk, (0, 255, 255), thickness_trk, cv2.LINE_AA)
         except Exception:
             pass
-        # --- ここまで追加 ---
 
         # サイズ合わせ（高さを基準に揃える）
         h_det, w_det, _ = det_vis.shape
@@ -361,7 +383,6 @@ class LangSamTrackerNode(Node):
         # 非ブロッキング表示
         cv2.imshow('LangSAM', combined)
         cv2.waitKey(1)
-        # --- 表示処理ここまで ---
 
         # トラック情報を/custom_msgs/TrackArrayで配信（既存）
         msg_tracks = TrackArray()
@@ -383,14 +404,13 @@ class LangSamTrackerNode(Node):
         # 最新フレームがなければスキップ
         if self.latest_bgr is None:
             return
-        # 既にバックグラウンド推論が走っていれば重複起動しない
-        if self.det_inflight:
+        # 既にバックグラウンド推論が走っていれば重複起動しない (Futureベース)
+        if self.det_future is not None and not self.det_future.done():
             return
 
         frame = self.latest_bgr.copy()
-        self.det_inflight = True
         # バックグラウンドで推論・描画・トラック初期化
-        self.detector_pool.submit(self._run_detection_job, frame)
+        self.det_future = self.detector_pool.submit(self._run_detection_job, frame)
 
     def _run_detection_job(self, cv_image):
         try:
@@ -402,44 +422,31 @@ class LangSamTrackerNode(Node):
             det = results[0]
 
             # boxes/masks/scores/labels を numpy に正規化
-            boxes = det.get('boxes', None)
-            if boxes is None:
-                boxes_np = np.zeros((0, 4), dtype=np.float32)
-            else:
-                if hasattr(boxes, 'cpu'):
-                    boxes = boxes.cpu().numpy()
-                boxes_np = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+            boxes = self._to_numpy(det.get('boxes', None))
+            boxes_np = np.zeros((0, 4), dtype=np.float32) if boxes is None else np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
 
             h, w, _ = cv_image.shape
-            masks = det.get('masks', None)
+            masks = self._to_numpy(det.get('masks', None))
             if masks is None:
                 masks_np = np.zeros((boxes_np.shape[0], h, w), dtype=bool)
             else:
-                if hasattr(masks, 'cpu'):
-                    masks = masks.cpu().numpy()
                 masks_np = np.asarray(masks)
+                # normalize dims: expect (N, H, W) or (N,1,H,W)
                 if masks_np.ndim == 4 and masks_np.shape[1] == 1:
                     masks_np = masks_np[:, 0]
-                if masks_np.ndim == 3:
-                    pass
-                elif masks_np.ndim == 2:
+                if masks_np.ndim == 2:
                     masks_np = masks_np[0:1, ...]
-                else:
+                if masks_np.ndim != 3:
                     masks_np = np.zeros((boxes_np.shape[0], h, w), dtype=bool)
                 masks_np = masks_np.astype(bool)
 
             labels = det.get('labels', [])
             labels_det = [str(l) for l in labels] if len(labels) > 0 else []
 
-            scores = det.get('scores', None)
-            if scores is None:
-                scores_np = np.zeros((boxes_np.shape[0],), dtype=np.float32)
-            else:
-                if hasattr(scores, 'cpu'):
-                    scores = scores.cpu().numpy()
-                scores_np = np.asarray(scores, dtype=np.float32).reshape(-1)
+            scores = self._to_numpy(det.get('scores', None))
+            scores_np = np.zeros((boxes_np.shape[0],), dtype=np.float32) if scores is None else np.asarray(scores, dtype=np.float32).reshape(-1)
 
-            # 検出可視化を作成（以前はpublishしていた）
+            # 検出可視化を作成
             det_image_pil = draw_image(
                 image_rgb=pil_image,
                 masks=masks_np,
@@ -449,24 +456,14 @@ class LangSamTrackerNode(Node):
             )
             det_image_cv = cv2.cvtColor(np.array(det_image_pil), cv2.COLOR_RGB2BGR)
 
-            # --- 追加: 検出完了時刻でdet_fpsを更新（スレッドセーフ、共通alphaを使用） ---
+            # 検出完了時刻でdet_fpsを更新（スレッドセーフ、共通alphaを使用）および可視化/トラック初期化
             now = time.time()
             with self.state_lock:
-                if self.det_last_time is not None:
-                    dt = now - self.det_last_time
-                    if dt > 1e-6:
-                        inst_fps = 1.0 / dt
-                        self.det_fps = (1.0 - self.fps_alpha) * self.det_fps + self.fps_alpha * inst_fps if self.det_fps > 0 else inst_fps
-                self.det_last_time = now
-            # --- ここまで追加 ---
-
-            # --- 検出可視化を共有変数に保存（スレッドセーフ） ---
-            with self.state_lock:
+                # 更新
+                self._update_ema_fps(now, 'det_last_time', 'det_fps')
+                # 可視化保存 (コピーして共有)
                 self.latest_det_vis = det_image_cv.copy()
-            # --- ここまで ---
-
-            # 検出からトラック初期化（共有状態をロック）
-            with self.state_lock:
+                # トラック初期化
                 self._init_tracks_from_detections(
                     cv_image,
                     boxes_np.tolist(),
@@ -477,7 +474,11 @@ class LangSamTrackerNode(Node):
         except Exception as e:
             self.get_logger().error(f'バックグラウンド検出で例外: {e}')
         finally:
-            self.det_inflight = False
+            # Future ベースなので特別にフラグを消す必要はないが参照を解放して GC を助ける
+            try:
+                self.det_future = None
+            except Exception:
+                pass
 
 
 def main(args=None):
