@@ -93,6 +93,7 @@ class LangSamTrackerNode(Node):
         self.declare_parameter('klt_criteria_count', 30)      # integer
         self.declare_parameter('klt_criteria_eps', 0.03)      # double
         self.declare_parameter('klt_min_points', 5)           # integer: 維持すべき最小追跡点数
+        self.declare_parameter('klt_outlier_max_dist', 80.0)  # double(px): 特徴点群の中央値からこの距離を超える点は外れ値として除去(壁などへの吸着対策)
 
         # GFTT(Shi-Tomasi)のROSパラメータ
         self.declare_parameter('gftt_max_corners', 120)       # integer
@@ -113,6 +114,7 @@ class LangSamTrackerNode(Node):
         self.klt_criteria_count = int(self.get_parameter('klt_criteria_count').get_parameter_value().integer_value)
         self.klt_criteria_eps = float(self.get_parameter('klt_criteria_eps').get_parameter_value().double_value)
         self.klt_min_points = int(self.get_parameter('klt_min_points').get_parameter_value().integer_value)
+        self.klt_outlier_max_dist = float(self.get_parameter('klt_outlier_max_dist').get_parameter_value().double_value)
 
         # GFTTパラメータの取得
         self.gftt_max_corners = int(self.get_parameter('gftt_max_corners').get_parameter_value().integer_value)
@@ -250,6 +252,13 @@ class LangSamTrackerNode(Node):
                     good_xy = good.reshape(-1, 2)
                 except Exception:
                     continue
+
+            # 特徴点群の中央値から離れすぎた点を外れ値として除去（壁などへの吸着対策）
+            center = np.median(good_xy, axis=0)
+            dist = np.linalg.norm(good_xy - center, axis=1)
+            inlier = dist <= self.klt_outlier_max_dist
+            if inlier.any():
+                good_xy = good_xy[inlier]
 
             # 最低点数をROSパラメータで判定
             if good_xy.shape[0] < self.klt_min_points:
