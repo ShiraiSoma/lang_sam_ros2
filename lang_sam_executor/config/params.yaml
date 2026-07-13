@@ -5,21 +5,20 @@ lang_sam_tracker:
     text_prompt: "plastic bottle."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
-    detection_interval_sec: 2.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増)、↑でKLT主体
+    detection_interval_sec: 2.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増=ドリフト矯正頻度↑)
     image_topic: /image_raw  # 画像トピック名
-    
-    # KLT (LK Optical Flow)
-    klt_win_size: [21, 21]        # 追跡窓(px)。大きいほど頑健/遅い。速い/大きな動き→[21,21]〜[31,31]、小物→[11,11]〜[15,15]
-    klt_max_level: 5              # ピラミッド段数。大きい動き対応↑/計算増。2〜4推奨
-    klt_criteria_count: 30        # 反復上限。ノイズ多い/収束悪い→↑(20〜50)
-    klt_criteria_eps: 0.005        # 収束許容誤差。小さいほど精密/遅い。0.01〜0.05目安
-    klt_min_points: 5             # トラック維持の最低特徴点数。破綻防止。5〜20で調整
-    klt_outlier_max_dist: 80.0    # 特徴点群の中央値からの許容距離(px)。超えた点は外れ値として除去(壁などへの吸着対策)。狭いほど厳格
 
-    # GFTT (Shi-Tomasi)
-    gftt_max_corners: 300         # 初期/再サンプル時の最大特徴点数。↑で安定/計算増。小物:80〜150、大きいシーン:150〜300
-    gftt_quality_level: 0.005      # 0〜1の品質閾値。↓で点が増えるがノイズも増。0.005〜0.02で調整
-    gftt_min_distance: 3.0        # 特徴点間の最小距離(px)。↓で密/重複↑、↑で疎/安定。3〜10目安
+    # Cutie (VOSマスク伝播トラッカー)
+    cutie_weights: ""             # 重みファイルパス。空なら~/.cache/cutie/に自動ダウンロード
+    cutie_max_internal_size: 480  # 内部処理解像度の最小辺(px)。↓で高速/粗い、↑で精細/遅い。480が標準
+    cutie_mem_every: 5            # メモリ記銘の間隔(フレーム)。↓で頑健/メモリ増、↑で軽量
+    cutie_use_long_term: true     # 長期メモリ。長時間追跡でのメモリ肥大を抑制
+    cutie_use_amp: false          # 混合精度(FP16)で高速化。精度は僅かに低下
+
+    # トラック管理 (再検出とのマージ規則)
+    merge_iou_threshold: 0.3          # 検出マスクと既存トラックを同一とみなすIoU。↑で厳格(ID分裂しやすい)、↓で緩い(誤マージ増)
+    track_max_detection_misses: 3     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
+    track_lost_frames: 90             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
 
 lang_sam_person_following:
   ros__parameters:

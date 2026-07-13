@@ -16,6 +16,7 @@ from lang_sam import LangSAM
 from lang_sam.utils import draw_image  # 可視化ユーティリティ
 from lang_sam.models.utils import DEVICE  # 推論デバイス（cuda/cpu取得）
 from lang_sam_msgs.msg import TrackArray, Track # カスタムメッセージ
+from lang_sam_tracker.cutie_tracker import CutieTracker  # Cutie(VOS)マスク伝播
 
 class LangSamTrackerNode(Node):
     def __init__(self):
@@ -30,15 +31,27 @@ class LangSamTrackerNode(Node):
         self.device = DEVICE
 
         # LangSAMモデルのロード（GroundingDINO+SAMの複合推論）
+        # 注意: sam2がHydraを初期化するためCutieより先にロードする
         self.model = LangSAM()
+
+        # Cutie(VOS)トラッカーのロード
+        # 検出マスクをメモリに記銘し、毎フレームのマスクを伝播で更新する
+        self.cutie = CutieTracker(
+            device=self.device,
+            weights_path=(self.cutie_weights or None),
+            max_internal_size=self.cutie_max_internal_size,
+            mem_every=self.cutie_mem_every,
+            use_long_term=self.cutie_use_long_term,
+            use_amp=self.cutie_use_amp,
+        )
 
         # ROS <-> OpenCV画像変換
         self.bridge = CvBridge()
 
-        # KLTトラッキング状態
-        self.tracks = []
-        self.prev_gray = None
-        self.next_track_id = 0
+        # トラッキング状態: id -> {label, score, box, mask, miss_det, lost_frames}
+        # idはCutieのオブジェクトID（0は背景のため1始まり）
+        self.tracks = {}
+        self.next_track_id = 1
         self.latest_bgr = None  # タイマー検出用に最新フレームを保持
 
         # 共有状態ロックと検出用スレッドプール
@@ -49,13 +62,11 @@ class LangSamTrackerNode(Node):
 
         # I/O: 入力画像サブスク / 出力画像パブリッシュ
         self.image_sub = self.create_subscription(ROSImage, self.image_topic, self.image_callback, 1)
-        # ...既存のトピックパブリッシャー作成は削除: image_detection_pub / image_tracking_pub は使用しない...
         self.tracks_pub = self.create_publisher(TrackArray, '/lang_sam/tracks', 1)
 
         # 可視化用共有イメージ（検出スレッド -> 表示）
         self.latest_det_vis = None  # OpenCV BGR image or None
 
-        # 表示FPS用（トラッキング）
         # トラッキングFPS計測
         self.track_last_time = time.time()
         self.track_fps = 0.0
@@ -74,7 +85,7 @@ class LangSamTrackerNode(Node):
         self.get_logger().info(f'Using text prompt: {self.text_prompt}')
         self.get_logger().info(f'Detection interval (sec): {self.detection_interval_sec}')
         self.get_logger().info(f'Image topic: {self.image_topic}')
-        self.get_logger().info('LangSAM model initialized.')
+        self.get_logger().info('LangSAM + Cutie models initialized.')
 
     # パラメータ取得用の関数
     def _setup_parameters(self):
@@ -86,19 +97,17 @@ class LangSamTrackerNode(Node):
         self.declare_parameter('detection_interval_sec', 2.0)
         self.declare_parameter('image_topic', '/camera/image_raw')
 
-        # KLT(LK光学フロー)のROSパラメータ
-        # - 窓サイズ、ピラミッド段数、収束条件、最低存続点数
-        self.declare_parameter('klt_win_size', [15, 15])      # integer_array [w, h]
-        self.declare_parameter('klt_max_level', 3)            # integer
-        self.declare_parameter('klt_criteria_count', 30)      # integer
-        self.declare_parameter('klt_criteria_eps', 0.03)      # double
-        self.declare_parameter('klt_min_points', 5)           # integer: 維持すべき最小追跡点数
-        self.declare_parameter('klt_outlier_max_dist', 80.0)  # double(px): 特徴点群の中央値からこの距離を超える点は外れ値として除去(壁などへの吸着対策)
+        # Cutie(VOS)のROSパラメータ
+        self.declare_parameter('cutie_weights', '')              # 空なら~/.cache/cutie/へ自動ダウンロード
+        self.declare_parameter('cutie_max_internal_size', 480)   # 内部処理の最小辺(px)。小さいほど速い/粗い
+        self.declare_parameter('cutie_mem_every', 5)              # メモリ記銘の間隔(フレーム)
+        self.declare_parameter('cutie_use_long_term', True)       # 長期メモリ(長時間の追跡でメモリ量を抑制)
+        self.declare_parameter('cutie_use_amp', False)             # 混合精度で高速化(精度僅かに低下)
 
-        # GFTT(Shi-Tomasi)のROSパラメータ
-        self.declare_parameter('gftt_max_corners', 120)       # integer
-        self.declare_parameter('gftt_quality_level', 0.01)    # double
-        self.declare_parameter('gftt_min_distance', 3.0)      # double(画素)
+        # トラック管理（検出とのマージ規則）のROSパラメータ
+        self.declare_parameter('merge_iou_threshold', 0.3)          # 検出と既存トラックを同一とみなすマスクIoU
+        self.declare_parameter('track_max_detection_misses', 3)     # 再検出で連続この回数裏付けなし→削除
+        self.declare_parameter('track_lost_frames', 90)             # 伝播マスクが空のフレーム数がこれを超えたら削除
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
         self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
@@ -107,19 +116,17 @@ class LangSamTrackerNode(Node):
         self.detection_interval_sec = self.get_parameter('detection_interval_sec').get_parameter_value().double_value
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
-        # KLTパラメータの取得と整形
-        ws = self.get_parameter('klt_win_size').get_parameter_value().integer_array_value
-        self.klt_win_size = (int(ws[0]), int(ws[1])) if len(ws) >= 2 else (15, 15)
-        self.klt_max_level = int(self.get_parameter('klt_max_level').get_parameter_value().integer_value)
-        self.klt_criteria_count = int(self.get_parameter('klt_criteria_count').get_parameter_value().integer_value)
-        self.klt_criteria_eps = float(self.get_parameter('klt_criteria_eps').get_parameter_value().double_value)
-        self.klt_min_points = int(self.get_parameter('klt_min_points').get_parameter_value().integer_value)
-        self.klt_outlier_max_dist = float(self.get_parameter('klt_outlier_max_dist').get_parameter_value().double_value)
+        # Cutieパラメータの取得
+        self.cutie_weights = self.get_parameter('cutie_weights').get_parameter_value().string_value
+        self.cutie_max_internal_size = int(self.get_parameter('cutie_max_internal_size').get_parameter_value().integer_value)
+        self.cutie_mem_every = int(self.get_parameter('cutie_mem_every').get_parameter_value().integer_value)
+        self.cutie_use_long_term = bool(self.get_parameter('cutie_use_long_term').get_parameter_value().bool_value)
+        self.cutie_use_amp = bool(self.get_parameter('cutie_use_amp').get_parameter_value().bool_value)
 
-        # GFTTパラメータの取得
-        self.gftt_max_corners = int(self.get_parameter('gftt_max_corners').get_parameter_value().integer_value)
-        self.gftt_quality_level = float(self.get_parameter('gftt_quality_level').get_parameter_value().double_value)
-        self.gftt_min_distance = float(self.get_parameter('gftt_min_distance').get_parameter_value().double_value)
+        # トラック管理パラメータの取得
+        self.merge_iou_threshold = float(self.get_parameter('merge_iou_threshold').get_parameter_value().double_value)
+        self.track_max_detection_misses = int(self.get_parameter('track_max_detection_misses').get_parameter_value().integer_value)
+        self.track_lost_frames = int(self.get_parameter('track_lost_frames').get_parameter_value().integer_value)
 
     # --- tensor/torch -> numpy 変換 ---
     def _to_numpy(self, x):
@@ -150,139 +157,142 @@ class LangSamTrackerNode(Node):
         setattr(self, last_name, now)
         return getattr(self, fps_name)
 
-    def _init_tracks_from_detections(self, cv_image, boxes, labels, scores, masks_bool):
-        # 検出結果からトラック群を初期化
-        # - マスク領域からgoodFeaturesToTrackでKLTの初期点をサンプリング
-        # - bbox/label/score/maskをtrack辞書に格納
-        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        self.prev_gray = gray
-        self.tracks = []
-        h, w = gray.shape
-        for i, box in enumerate(boxes):
-            x1, y1, x2, y2 = [int(v) for v in box]
+    @staticmethod
+    def _box_from_mask(mask_bool):
+        # マスクの外接矩形 [x1,y1,x2,y2] を返す（空マスクはNone）
+        ys, xs = np.where(mask_bool)
+        if len(xs) == 0:
+            return None
+        return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
 
-            # マスクが無い検出はトラックを生成しない（疑似マスクは作らない設計）
-            if i >= masks_bool.shape[0] or masks_bool[i].dtype != bool or not masks_bool[i].any():
+    @staticmethod
+    def _mask_iou(a, b):
+        inter = np.logical_and(a, b).sum()
+        if inter == 0:
+            return 0.0
+        union = np.logical_or(a, b).sum()
+        return float(inter) / float(union)
+
+    def _delete_tracks(self, ids):
+        # Cutieメモリとトラック辞書の両方から削除（state_lock保持前提）
+        if not ids:
+            return
+        self.cutie.delete(ids)
+        for tid in ids:
+            self.tracks.pop(tid, None)
+
+    def _update_tracks_with_cutie(self, cv_image):
+        # Cutieのメモリに基づき現フレームへマスクを伝播し、各トラックのマスク/bboxを更新
+        # （state_lock保持前提）
+        if not self.tracks:
+            return
+        idx_mask = self.cutie.track(cv_image)
+        to_delete = []
+        for tid, t in self.tracks.items():
+            m = idx_mask == tid
+            box = self._box_from_mask(m)
+            if box is not None:
+                t['mask'] = m
+                t['box'] = box
+                t['lost_frames'] = 0
+            else:
+                # 伝播でマスクが消失（遮蔽/画面外など）。bboxは最後の位置を保持
+                t['mask'] = m
+                t['lost_frames'] += 1
+                if t['lost_frames'] > self.track_lost_frames:
+                    to_delete.append(tid)
+        self._delete_tracks(to_delete)
+
+    def _merge_detections(self, det_frame, labels, scores, masks_bool):
+        # 再検出結果と既存トラックをマスクIoUでマッチングしてマージ（state_lock保持前提）
+        # - マッチ: IDを維持しつつ新鮮なSAMマスクで矯正（ドリフト解消）
+        # - 未マッチの検出: 新規トラック
+        # - 未マッチのトラック: missカウント増、閾値超過で削除
+        h, w = det_frame.shape[:2]
+
+        # 空マスクの検出は除外（疑似マスクは作らない設計）
+        det_indices = [i for i in range(masks_bool.shape[0]) if masks_bool[i].any()]
+
+        # IoU降順の貪欲マッチング
+        track_ids = list(self.tracks.keys())
+        pairs = []
+        for i in det_indices:
+            for tid in track_ids:
+                iou = self._mask_iou(masks_bool[i], self.tracks[tid]['mask'])
+                if iou >= self.merge_iou_threshold:
+                    pairs.append((iou, i, tid))
+        pairs.sort(reverse=True)
+        det_to_tid = {}
+        matched_tids = set()
+        for iou, i, tid in pairs:
+            if i in det_to_tid or tid in matched_tids:
                 continue
-            mask_uint8 = (masks_bool[i].astype(np.uint8)) * 255  # goodFeaturesToTrackがuint8マスクを要求
+            det_to_tid[i] = tid
+            matched_tids.add(tid)
 
-            # GFTTパラメータをROSから取得した値で適用
-            pts = cv2.goodFeaturesToTrack(
-                image=gray,
-                maxCorners=self.gftt_max_corners,
-                qualityLevel=self.gftt_quality_level,
-                minDistance=self.gftt_min_distance,
-                mask=mask_uint8
-            )
-            # 最低点数をROSパラメータで判定
-            if pts is None or pts.shape[0] < self.klt_min_points:
+        # 未マッチトラックのmiss処理
+        to_delete = []
+        for tid in track_ids:
+            if tid in matched_tids:
                 continue
+            t = self.tracks[tid]
+            t['miss_det'] += 1
+            if t['miss_det'] > self.track_max_detection_misses:
+                to_delete.append(tid)
+        self._delete_tracks(to_delete)
 
-            track = {
-                'id': self.next_track_id,
+        # 未マッチの検出は新規トラックとして採番
+        for i in det_indices:
+            if i in det_to_tid:
+                continue
+            det_to_tid[i] = self.next_track_id
+            self.tracks[self.next_track_id] = {
                 'label': labels[i] if i < len(labels) else 'obj',
                 'score': float(scores[i]) if i < len(scores) else 1.0,
-                'points': pts,              # (N,1,2) float32
-                'box': [x1, y1, x2, y2],
-                'mask': masks_bool[i]       # 検出時点のマスク（bool, HxW）
+                'box': [0, 0, 0, 0],
+                'mask': np.zeros((h, w), dtype=bool),
+                'miss_det': 0,
+                'lost_frames': 0,
             }
-            self.tracks.append(track)
             self.next_track_id += 1
 
-    def _mask_from_points(self, points, shape):
-        # KLT更新後の特徴点群から各特徴点をそのまま描画してマスクを再構成
-        # points: (M,1,2) または (M,2)、shape: (H,W)
-        if points is None:
-            return np.zeros(shape, dtype=bool)
+        # マッチしたトラックはラベル/スコアを更新しmissをリセット
+        for i, tid in det_to_tid.items():
+            t = self.tracks[tid]
+            if i < len(labels):
+                t['label'] = labels[i]
+            if i < len(scores):
+                t['score'] = float(scores[i])
+            t['miss_det'] = 0
 
-        # 正規化して (N,2) 形状にする
-        try:
-            pts = points.reshape(-1, 2)
-        except Exception:
-            return np.zeros(shape, dtype=bool)
-
-        if pts.shape[0] < 1:
-            return np.zeros(shape, dtype=bool)
-
-        mask = np.zeros(shape, dtype=np.uint8)
-        # 点を描画する半径（ピクセル）。必要ならパラメータ化可能。
-        radius = 5
-        thickness = -1  # 塗りつぶし
-        for (x_f, y_f) in pts:
-            x = int(np.round(x_f))
-            y = int(np.round(y_f))
-            # 画像境界内のみ描画
-            if 0 <= x < shape[1] and 0 <= y < shape[0]:
-                cv2.circle(mask, (x, y), radius, 255, thickness)
-
-        return mask.astype(bool)
-
-    def _update_tracks_with_klt(self, cv_image):
-        # 直前(prev_gray)と現在フレームの間でピラミッドLKを計算し、各トラックの特徴点/マスク/bboxを更新
-        if self.prev_gray is None or len(self.tracks) == 0:
+        if not self.tracks:
             return
-        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        new_tracks = []
-        # KLTパラメータをROSから取得した値で適用
-        lk_params = dict(
-            winSize=tuple(map(int, self.klt_win_size)),
-            maxLevel=int(self.klt_max_level),
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-                      int(self.klt_criteria_count),
-                      float(self.klt_criteria_eps))
-        )
-        h, w = gray.shape
-        for track in self.tracks:
-            pts = track['points'].astype(np.float32)  # (N,1,2)
-            new_pts, st, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, pts, None, **lk_params)
-            if new_pts is None or st is None:
-                continue
 
-            # 追跡成功点のみ抽出
-            st_flat = st.flatten().astype(bool)
-            good = new_pts[st_flat]
+        # Cutieへ渡す統合インデックスマスクを構成
+        # - 検出に裏付けられないが生存中のトラックは現在のマスクを維持
+        # - 検出マスクはスコア昇順に塗る（重なりは高スコアが優先）
+        combined = np.zeros((h, w), dtype=np.int32)
+        for tid, t in self.tracks.items():
+            if tid not in matched_tids and tid not in det_to_tid.values():
+                combined[t['mask']] = tid
+        order = sorted(det_to_tid.keys(), key=lambda i: float(scores[i]) if i < len(scores) else 1.0)
+        for i in order:
+            combined[masks_bool[i]] = det_to_tid[i]
 
-            # 形状を(N,2)に正規化
-            if good.ndim == 3 and good.shape[1] == 1 and good.shape[2] == 2:
-                good_xy = good[:, 0, :]
-            elif good.ndim == 2 and good.shape[1] == 2:
-                good_xy = good
+        # 検出フレームを正解としてメモリに記銘（初期化・矯正兼用）
+        alive_ids = list(self.tracks.keys())
+        out_idx = self.cutie.seed(det_frame, combined, alive_ids)
+
+        # 記銘後のマスクで各トラックを更新
+        for tid, t in self.tracks.items():
+            m = out_idx == tid
+            box = self._box_from_mask(m)
+            if box is not None:
+                t['mask'] = m
+                t['box'] = box
+                t['lost_frames'] = 0
             else:
-                try:
-                    good_xy = good.reshape(-1, 2)
-                except Exception:
-                    continue
-
-            # 特徴点群の中央値から離れすぎた点を外れ値として除去（壁などへの吸着対策）
-            center = np.median(good_xy, axis=0)
-            dist = np.linalg.norm(good_xy - center, axis=1)
-            inlier = dist <= self.klt_outlier_max_dist
-            if inlier.any():
-                good_xy = good_xy[inlier]
-
-            # 最低点数をROSパラメータで判定
-            if good_xy.shape[0] < self.klt_min_points:
-                continue
-
-            # bboxは特徴点のmin/maxから更新（画像境界でクリップ）
-            x_min = int(np.clip(np.min(good_xy[:, 0]), 0, w - 1))
-            y_min = int(np.clip(np.min(good_xy[:, 1]), 0, h - 1))
-            x_max = int(np.clip(np.max(good_xy[:, 0]), 0, w - 1))
-            y_max = int(np.clip(np.max(good_xy[:, 1]), 0, h - 1))
-
-            # 特徴点の凸包からマスクを再構成（可視化で利用）
-            good_pts = good_xy.reshape(-1, 1, 2).astype(np.float32)
-            mask_bool = self._mask_from_points(good_pts, (h, w))
-
-            # トラック更新
-            track['points'] = good_pts
-            track['box'] = [x_min, y_min, x_max, y_max]
-            track['mask'] = mask_bool
-            new_tracks.append(track)
-
-        # 次フレームのKLTに備えてprev_gray更新
-        self.tracks = new_tracks
-        self.prev_gray = gray
+                t['mask'] = m
 
     def image_callback(self, msg):
         # 入力: ROS Image -> OpenCV(BGR)
@@ -290,15 +300,15 @@ class LangSamTrackerNode(Node):
         # タイマー検出用に最新フレームを保持
         self.latest_bgr = cv_image
 
-        # KLT更新は共有状態を保護
+        # Cutie伝播は共有状態を保護
         with self.state_lock:
-            self._update_tracks_with_klt(cv_image)
+            self._update_tracks_with_cutie(cv_image)
             # 可視化用にスナップショットを作る（ロック時間を短くするため必要最小限をコピー）
             if self.tracks:
-                boxes_for_draw = np.asarray([t['box'] for t in self.tracks], dtype=np.int32)
-                labels_for_draw = [t['label'] for t in self.tracks]
-                scores_for_draw = np.asarray([t['score'] for t in self.tracks], dtype=np.float32)
-                masks_for_draw = np.asarray([t['mask'] for t in self.tracks], dtype=bool)
+                boxes_for_draw = np.asarray([t['box'] for t in self.tracks.values()], dtype=np.int32)
+                labels_for_draw = [t['label'] for t in self.tracks.values()]
+                scores_for_draw = np.asarray([t['score'] for t in self.tracks.values()], dtype=np.float32)
+                masks_for_draw = np.asarray([t['mask'] for t in self.tracks.values()], dtype=bool)
             else:
                 h, w, _ = cv_image.shape
                 boxes_for_draw = np.zeros((0, 4), dtype=np.int32)
@@ -384,10 +394,6 @@ class LangSamTrackerNode(Node):
         # Trackingラベル位置（右側の画像の左端を計算）
         x_right = det_vis.shape[1] + 10
         cv2.putText(combined, 'Tracking', (x_right, 30), font, font_scale, (0, 255, 0), thickness, cv2.LINE_AA)
-        # FPS描画（右上）
-        # fps_text = f'FPS: {self.fps:.1f}'
-        # cv2.putText(combined, fps_text, (combined.shape[1] - 200, 30), font, font_scale, (0, 255, 255), thickness, cv2.LINE_AA)
-        # （注）個別画像上にFPSを描画済みのため、合成後の汎用FPS描画は不要
 
         # 非ブロッキング表示
         cv2.imshow('LangSAM', combined)
@@ -398,9 +404,9 @@ class LangSamTrackerNode(Node):
         msg_tracks.header.stamp = self.get_clock().now().to_msg()
         msg_tracks.header.frame_id = 'camera'
         with self.state_lock:
-            for t in self.tracks:
+            for tid, t in self.tracks.items():
                 tr = Track()
-                tr.id = int(t['id'])
+                tr.id = int(tid)
                 tr.label = str(t['label'])
                 tr.score = float(t['score'])
                 x1, y1, x2, y2 = t['box']
@@ -418,7 +424,7 @@ class LangSamTrackerNode(Node):
             return
 
         frame = self.latest_bgr.copy()
-        # バックグラウンドで推論・描画・トラック初期化
+        # バックグラウンドで推論・描画・トラックマージ
         self.det_future = self.detector_pool.submit(self._run_detection_job, frame)
 
     def _run_detection_job(self, cv_image):
@@ -465,17 +471,16 @@ class LangSamTrackerNode(Node):
             )
             det_image_cv = cv2.cvtColor(np.array(det_image_pil), cv2.COLOR_RGB2BGR)
 
-            # 検出完了時刻でdet_fpsを更新（スレッドセーフ、共通alphaを使用）および可視化/トラック初期化
+            # 検出完了時刻でdet_fpsを更新（スレッドセーフ、共通alphaを使用）および可視化/トラックマージ
             now = time.time()
             with self.state_lock:
                 # 更新
                 self._update_ema_fps(now, 'det_last_time', 'det_fps')
                 # 可視化保存 (コピーして共有)
                 self.latest_det_vis = det_image_cv.copy()
-                # トラック初期化
-                self._init_tracks_from_detections(
+                # 既存トラックとIoUマッチングしてCutieへ記銘
+                self._merge_detections(
                     cv_image,
-                    boxes_np.tolist(),
                     labels_det,
                     scores_np.tolist(),
                     masks_np
