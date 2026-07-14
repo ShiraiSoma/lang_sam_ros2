@@ -106,8 +106,10 @@ class LangSamTrackerNode(Node):
 
         # トラック管理（検出とのマージ規則）のROSパラメータ
         self.declare_parameter('merge_iou_threshold', 0.3)          # 検出と既存トラックを同一とみなすマスクIoU
+        self.declare_parameter('duplicate_overlap_threshold', 0.5)  # 同一物体の多重登録とみなす重なり率(交差/小さい方の面積)
         self.declare_parameter('track_max_detection_misses', 3)     # 再検出で連続この回数裏付けなし→削除
         self.declare_parameter('track_lost_frames', 90)             # 伝播マスクが空のフレーム数がこれを超えたら削除
+        self.declare_parameter('track_min_mask_area', 100)          # これ未満の面積(px)のマスクは消失扱い(重複登録の残骸対策)
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
         self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
@@ -125,8 +127,10 @@ class LangSamTrackerNode(Node):
 
         # トラック管理パラメータの取得
         self.merge_iou_threshold = float(self.get_parameter('merge_iou_threshold').get_parameter_value().double_value)
+        self.duplicate_overlap_threshold = float(self.get_parameter('duplicate_overlap_threshold').get_parameter_value().double_value)
         self.track_max_detection_misses = int(self.get_parameter('track_max_detection_misses').get_parameter_value().integer_value)
         self.track_lost_frames = int(self.get_parameter('track_lost_frames').get_parameter_value().integer_value)
+        self.track_min_mask_area = int(self.get_parameter('track_min_mask_area').get_parameter_value().integer_value)
 
     # --- tensor/torch -> numpy 変換 ---
     def _to_numpy(self, x):
@@ -173,6 +177,16 @@ class LangSamTrackerNode(Node):
         union = np.logical_or(a, b).sum()
         return float(inter) / float(union)
 
+    @staticmethod
+    def _mask_overlap_min(a, b):
+        # 交差 / 小さい方の面積。部分検出(全体の一部だけの検出)や包含関係は
+        # IoUが低く出るため、多重登録の判定にはこちらを使う
+        inter = np.logical_and(a, b).sum()
+        if inter == 0:
+            return 0.0
+        smaller = min(a.sum(), b.sum())
+        return float(inter) / float(smaller) if smaller > 0 else 0.0
+
     def _delete_tracks(self, ids):
         # Cutieメモリとトラック辞書の両方から削除（state_lock保持前提）
         if not ids:
@@ -190,10 +204,10 @@ class LangSamTrackerNode(Node):
         to_delete = []
         for tid, t in self.tracks.items():
             m = idx_mask == tid
-            box = self._box_from_mask(m)
-            if box is not None:
+            # 極小マスクは消失扱い(多重登録の残骸や誤伝播をlost_framesで淘汰)
+            if m.sum() >= self.track_min_mask_area:
                 t['mask'] = m
-                t['box'] = box
+                t['box'] = self._box_from_mask(m)
                 t['lost_frames'] = 0
             else:
                 # 伝播でマスクが消失（遮蔽/画面外など）。bboxは最後の位置を保持
@@ -212,6 +226,17 @@ class LangSamTrackerNode(Node):
 
         # 空マスクの検出は除外（疑似マスクは作らない設計）
         det_indices = [i for i in range(masks_bool.shape[0]) if masks_bool[i].any()]
+
+        # 検出同士の重複除去(同一物体の多重検出対策):
+        # スコア降順に走査し、採用済み検出と重なり率が閾値以上のものは捨てる
+        det_indices.sort(key=lambda i: -(float(scores[i]) if i < len(scores) else 1.0))
+        kept = []
+        for i in det_indices:
+            dup = any(self._mask_overlap_min(masks_bool[i], masks_bool[j]) >= self.duplicate_overlap_threshold
+                      for j in kept)
+            if not dup:
+                kept.append(i)
+        det_indices = kept
 
         # IoU降順の貪欲マッチング
         track_ids = list(self.tracks.keys())
@@ -242,8 +267,13 @@ class LangSamTrackerNode(Node):
         self._delete_tracks(to_delete)
 
         # 未マッチの検出は新規トラックとして採番
+        # ただし既存トラックと重なり率が高いものは同一物体の部分検出とみなして捨てる
+        # (IoUは低いがマスクが既存トラック内に包含されるケースの多重登録対策)
         for i in det_indices:
             if i in det_to_tid:
+                continue
+            if any(self._mask_overlap_min(masks_bool[i], t['mask']) >= self.duplicate_overlap_threshold
+                   for t in self.tracks.values()):
                 continue
             det_to_tid[i] = self.next_track_id
             self.tracks[self.next_track_id] = {
@@ -286,10 +316,9 @@ class LangSamTrackerNode(Node):
         # 記銘後のマスクで各トラックを更新
         for tid, t in self.tracks.items():
             m = out_idx == tid
-            box = self._box_from_mask(m)
-            if box is not None:
+            if m.sum() >= self.track_min_mask_area:
                 t['mask'] = m
-                t['box'] = box
+                t['box'] = self._box_from_mask(m)
                 t['lost_frames'] = 0
             else:
                 t['mask'] = m
