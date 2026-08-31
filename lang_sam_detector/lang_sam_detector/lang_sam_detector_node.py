@@ -7,6 +7,7 @@ detections(DetectionArray)としてそのまま返す。時刻同期は行わず
 リクエストのheader.stampをそのまま応答へコピーして相関を取る。
 """
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -17,7 +18,7 @@ from cv_bridge import CvBridge
 from PIL import Image as PILImage
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import Image as ROSImage
+from sensor_msgs.msg import CompressedImage
 
 from lang_sam import LangSAM
 from lang_sam.utils import draw_image
@@ -37,6 +38,8 @@ class LangSamDetectorNode(Node):
         self.model = LangSAM(sam_type=self.sam_model)
         self.bridge = CvBridge()
 
+        self._warmup()
+
         # 検出は同時に1件まで(処理中に届いたリクエストは読み捨てる。
         # ステートレスなので送信側のタイマーが次回再送してくれる)
         self.busy_lock = threading.Lock()
@@ -50,7 +53,7 @@ class LangSamDetectorNode(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
         self.request_sub = self.create_subscription(
-            ROSImage, self.request_topic, self._on_request, qos)
+            CompressedImage, self.request_topic, self._on_request, qos)
         self.detections_pub = self.create_publisher(DetectionArray, self.response_topic, qos)
 
         self.get_logger().info(f'Using device: {self.device}')
@@ -60,6 +63,23 @@ class LangSamDetectorNode(Node):
         self.get_logger().info(f'Response topic: {self.response_topic}')
         self.get_logger().info('LangSAM Detector initialized.')
 
+    def _warmup(self):
+        """初回リクエストでCUDAカーネルのJITコンパイル等による遅延が
+        出ないよう、起動時にダミー画像で一度推論しておく。失敗しても
+        起動は継続する(ウォームアップは無くても動作自体には影響しない)。
+        """
+        try:
+            dummy = PILImage.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
+            with torch.no_grad():
+                self.model.predict(
+                    [dummy], [self.text_prompt],
+                    box_threshold=self.box_threshold,
+                    text_threshold=self.text_threshold,
+                )
+            self.logger.info('ウォームアップ推論が完了しました')
+        except Exception:
+            self.logger.warning(f'ウォームアップに失敗(起動は継続します):\n{traceback.format_exc()}')
+
     def _setup_parameters(self):
         self.declare_parameter('sam_model', 'sam2.1_hiera_small')
         self.declare_parameter('text_prompt', 'wheel. car.')
@@ -67,6 +87,7 @@ class LangSamDetectorNode(Node):
         self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('request_topic', '/lang_sam/detect_request')
         self.declare_parameter('response_topic', '/lang_sam/detections')
+        self.declare_parameter('visualize', True)
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
         self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
@@ -74,6 +95,7 @@ class LangSamDetectorNode(Node):
         self.text_threshold = self.get_parameter('text_threshold').get_parameter_value().double_value
         self.request_topic = self.get_parameter('request_topic').get_parameter_value().string_value
         self.response_topic = self.get_parameter('response_topic').get_parameter_value().string_value
+        self.visualize = self.get_parameter('visualize').get_parameter_value().bool_value
 
     @staticmethod
     def _to_numpy(x):
@@ -86,13 +108,13 @@ class LangSamDetectorNode(Node):
                 pass
         return np.asarray(x)
 
-    def _on_request(self, msg: ROSImage):
+    def _on_request(self, msg: CompressedImage):
         with self.busy_lock:
             if self.busy:
                 self.logger.debug('検出処理中のためリクエストを読み捨てます')
                 return
             self.busy = True
-        cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        cv_image = cv2.imdecode(np.frombuffer(bytes(msg.data), dtype=np.uint8), cv2.IMREAD_COLOR)
         self.worker_pool.submit(self._run_detection_job, cv_image, msg.header)
 
     def _run_detection_job(self, cv_image: np.ndarray, header):
@@ -131,20 +153,25 @@ class LangSamDetectorNode(Node):
             scores_np = np.zeros((boxes_np.shape[0],), dtype=np.float32) if scores is None \
                 else np.asarray(scores, dtype=np.float32).reshape(-1)
 
-            try:
-                det_image_pil = draw_image(
-                    image_rgb=pil_image, masks=masks_np, xyxy=boxes_np,
-                    probs=scores_np, labels=labels_det,
-                )
-                det_image_cv = cv2.cvtColor(np.array(det_image_pil), cv2.COLOR_RGB2BGR)
-                cv2.imshow('LangSAM Detector', det_image_cv)
-                cv2.waitKey(1)
-            except Exception as e:
-                self.get_logger().warning(f'draw_image失敗(detection): {e}')
+            if self.visualize:
+                try:
+                    det_image_pil = draw_image(
+                        image_rgb=pil_image, masks=masks_np, xyxy=boxes_np,
+                        probs=scores_np, labels=labels_det,
+                    )
+                    det_image_cv = cv2.cvtColor(np.array(det_image_pil), cv2.COLOR_RGB2BGR)
+                    cv2.imshow('LangSAM Detector', det_image_cv)
+                    cv2.waitKey(1)
+                except Exception as e:
+                    self.get_logger().warning(f'draw_image失敗(detection): {e}')
 
             self._publish_detections(header, labels_det, scores_np, boxes_np, masks_np, h, w)
-        except Exception as e:
-            self.get_logger().error(f'検出処理で例外: {e}')
+        except Exception:
+            self.get_logger().error(f'検出処理で例外:\n{traceback.format_exc()}')
+            try:
+                self.model.sam.predictor.reset_predictor()
+            except Exception as e:
+                self.get_logger().warning(f'predictorのリセットに失敗: {e}')
         finally:
             with self.busy_lock:
                 self.busy = False

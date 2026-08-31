@@ -7,6 +7,7 @@ lang_sam_detector:
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     request_topic: /lang_sam/detect_request
     response_topic: /lang_sam/detections
+    visualize: true                # cv2.imshowでの可視化。ディスプレイの無いリモートサーバ等ではfalseにする
 
 # ロボット側PCで起動: lang_sam_tracker.launch.py
 lang_sam_tracker:
