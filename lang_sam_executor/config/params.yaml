@@ -5,7 +5,7 @@ lang_sam_tracker:
     text_prompt: "red pylon."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
-    detection_interval_sec: 10.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増=ドリフト矯正頻度↑)
+    detection_interval_sec: 2.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増=ドリフト矯正頻度↑)
     image_topic: /image_raw  # 画像トピック名
 
     # Cutie (VOSマスク伝播トラッカー)
@@ -18,7 +18,7 @@ lang_sam_tracker:
     # トラック管理 (再検出とのマージ規則)
     merge_iou_threshold: 0.1          # 検出マスクと既存トラックを同一とみなすIoU。↑で厳格(ID分裂しやすい)、↓で緩い(誤マージ増)
     duplicate_overlap_threshold: 0.5  # 同一物体の多重登録とみなす重なり率(交差/小さい方の面積)。検出同士・新規vs既存の両方に適用。↓で厳格(重複減)
-    track_max_detection_misses: 3     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
+    track_max_detection_misses: 1     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
     track_lost_frames: 90             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
     track_min_mask_area: 100          # これ未満の面積(px)のマスクは消失扱い(多重登録の残骸や誤伝播を淘汰)
 

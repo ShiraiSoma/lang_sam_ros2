@@ -178,6 +178,12 @@ class LangSamTrackerNode(Node):
         return float(inter) / float(union)
 
     @staticmethod
+    def _label_match(a, b):
+        # ラベル比較用の正規化（末尾ピリオド・前後空白・大小文字を無視）
+        norm = lambda s: str(s).strip().rstrip('.').strip().lower()
+        return norm(a) == norm(b)
+
+    @staticmethod
     def _mask_overlap_min(a, b):
         # 交差 / 小さい方の面積。部分検出(全体の一部だけの検出)や包含関係は
         # IoUが低く出るため、多重登録の判定にはこちらを使う
@@ -223,26 +229,31 @@ class LangSamTrackerNode(Node):
         # - 未マッチの検出: 新規トラック
         # - 未マッチのトラック: missカウント増、閾値超過で削除
         h, w = det_frame.shape[:2]
+        get_label = lambda i: labels[i] if i < len(labels) else 'obj'
 
         # 空マスクの検出は除外（疑似マスクは作らない設計）
         det_indices = [i for i in range(masks_bool.shape[0]) if masks_bool[i].any()]
 
         # 検出同士の重複除去(同一物体の多重検出対策):
         # スコア降順に走査し、採用済み検出と重なり率が閾値以上のものは捨てる
+        # (ラベルが異なる場合は別物体とみなし、重複除去の対象外とする)
         det_indices.sort(key=lambda i: -(float(scores[i]) if i < len(scores) else 1.0))
         kept = []
         for i in det_indices:
             dup = any(self._mask_overlap_min(masks_bool[i], masks_bool[j]) >= self.duplicate_overlap_threshold
+                      and self._label_match(get_label(i), get_label(j))
                       for j in kept)
             if not dup:
                 kept.append(i)
         det_indices = kept
 
-        # IoU降順の貪欲マッチング
+        # IoU降順の貪欲マッチング（ラベルが一致するトラックのみ対象）
         track_ids = list(self.tracks.keys())
         pairs = []
         for i in det_indices:
             for tid in track_ids:
+                if not self._label_match(get_label(i), self.tracks[tid]['label']):
+                    continue
                 iou = self._mask_iou(masks_bool[i], self.tracks[tid]['mask'])
                 if iou >= self.merge_iou_threshold:
                     pairs.append((iou, i, tid))
@@ -269,15 +280,17 @@ class LangSamTrackerNode(Node):
         # 未マッチの検出は新規トラックとして採番
         # ただし既存トラックと重なり率が高いものは同一物体の部分検出とみなして捨てる
         # (IoUは低いがマスクが既存トラック内に包含されるケースの多重登録対策)
+        # (ラベルが異なる既存トラックとの重なりは別物体のため対象外)
         for i in det_indices:
             if i in det_to_tid:
                 continue
             if any(self._mask_overlap_min(masks_bool[i], t['mask']) >= self.duplicate_overlap_threshold
+                   and self._label_match(get_label(i), t['label'])
                    for t in self.tracks.values()):
                 continue
             det_to_tid[i] = self.next_track_id
             self.tracks[self.next_track_id] = {
-                'label': labels[i] if i < len(labels) else 'obj',
+                'label': get_label(i),
                 'score': float(scores[i]) if i < len(scores) else 1.0,
                 'box': [0, 0, 0, 0],
                 'mask': np.zeros((h, w), dtype=bool),
