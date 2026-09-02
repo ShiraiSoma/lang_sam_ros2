@@ -2,7 +2,7 @@ lang_sam_tracker:
   ros__parameters:
     # LangSAM
     sam_model: sam2.1_hiera_small
-    text_prompt: "red pylon."
+    text_prompt: "brown ground. mobile robot."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     detection_interval_sec: 2.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増=ドリフト矯正頻度↑)
@@ -19,10 +19,23 @@ lang_sam_tracker:
     merge_iou_threshold: 0.1          # 検出マスクと既存トラックを同一とみなすIoU。↑で厳格(ID分裂しやすい)、↓で緩い(誤マージ増)
     duplicate_overlap_threshold: 0.5  # 同一物体の多重登録とみなす重なり率(交差/小さい方の面積)。検出同士・新規vs既存の両方に適用。↓で厳格(重複減)
     track_max_detection_misses: 1     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
-    track_lost_frames: 90             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
+    track_lost_frames: 10             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
     track_min_mask_area: 100          # これ未満の面積(px)のマスクは消失扱い(多重登録の残骸や誤伝播を淘汰)
 
 lang_sam_person_following:
   ros__parameters:
     image_width: 640   # 画像の幅（使用）
     kp_angular: 0.002  # 角速度の比例ゲイン（使用）
+
+lang_sam_ground_nav:
+  ros__parameters:
+    image_width: 640          # 画像の幅(px)。text_prompt検出に使うカメラ解像度に合わせる
+    image_height: 480         # 画像の高さ(px)。ロボットの近さ判定(bbox面積比)に使用
+    ground_label: "brown ground"  # 地面追従に使うトラックのラベル(text_promptの語句と対応)
+    robot_label: "mobile robot"   # 回避対象トラックのラベル(text_promptの語句と対応)
+    linear_speed: 0.2             # 通常走行時の並進速度(m/s)
+    kp_angular_ground: 0.002      # 地面追従: bbox中心オフセット→角速度の比例ゲイン
+    kp_angular_avoid: 0.002       # ロボット回避: bbox中心オフセット→角速度の比例ゲイン(地面追従と逆方向)
+    avoid_area_ratio_slow: 0.05   # ロボットbboxが画面に占める面積比がこれ以上で回避(操舵+減速)を開始。未満なら無視して地面追従を継続
+    avoid_area_ratio_stop: 0.15   # これ以上で並進停止(その場で回頭のみ)
+    max_angular_z: 0.6            # 角速度の上限(rad/s)。地面追従・回避の両方に適用。↓で回転を抑制
