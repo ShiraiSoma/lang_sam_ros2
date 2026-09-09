@@ -1,12 +1,21 @@
-lang_sam_tracker:
+# リモートPC(GPU)で起動: lang_sam_detector.launch.py
+lang_sam_detector:
   ros__parameters:
-    # LangSAM
     sam_model: sam2.1_hiera_small
     text_prompt: "red pylon."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
-    detection_interval_sec: 10.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増=ドリフト矯正頻度↑)
-    image_topic: /image_raw  # 画像トピック名
+    request_topic: /lang_sam/detect_request
+    response_topic: /lang_sam/detections
+
+# ロボット側PCで起動: lang_sam_tracker.launch.py
+lang_sam_tracker:
+  ros__parameters:
+    detection_interval_sec: 2.0   # 検出リクエスト送信間隔(秒)。↓で頻繁に再検出(通信・計算増=ドリフト矯正頻度↑)
+    image_topic: /image_raw        # 画像トピック名
+    detect_request_topic: /lang_sam/detect_request   # lang_sam_detectorへ送るトピック(要 同一ROS_DOMAIN_ID)
+    detect_response_topic: /lang_sam/detections       # lang_sam_detectorから受け取るトピック
+    detect_timeout_multiplier: 3.0  # 検出応答タイムアウト = detection_interval_sec × この倍率
 
     # Cutie (VOSマスク伝播トラッカー)
     cutie_weights: ""             # 重みファイルパス。空なら~/.cache/cutie/に自動ダウンロード
@@ -24,5 +33,5 @@ lang_sam_tracker:
 
 lang_sam_person_following:
   ros__parameters:
-    image_width: 640   # 画像の幅（使用）
-    kp_angular: 0.002  # 角速度の比例ゲイン（使用）
+    image_width: 640   # 画像の幅(使用)
+    kp_angular: 0.002  # 角速度の比例ゲイン(使用)

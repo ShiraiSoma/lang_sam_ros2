@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --partition=research
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --gpus-per-task=1
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
+#SBATCH --job-name=lang_sam_server
+#SBATCH --container=gpumng2.cle.it-chiba.ac.jp/u23c1070/lang_sam_server:1.6
+
+echo "NODE_IP: $(hostname -I)"
+
+# 検出パラメータを変更したい場合はここで上書き(コメントアウトを外す)
+# export SAM_MODEL="sam2.1_hiera_small"
+# export TEXT_PROMPT="blue cup."
+# export BOX_THRESHOLD="0.3"
+# export TEXT_THRESHOLD="0.25"
+
+bash /opt/lang_sam_ws/docker/entrypoint.sh

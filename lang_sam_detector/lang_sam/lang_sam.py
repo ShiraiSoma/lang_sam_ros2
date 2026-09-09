@@ -61,16 +61,16 @@ class LangSAM:
 
             all_results.append(processed_result)
         if sam_images:
-            # print(f"Predicting {len(sam_boxes)} masks")
-            masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
-            for idx, mask, score in zip(sam_indices, masks, mask_scores):
+            # 画像1枚につき複数の箱を渡すケースで predict_batch (複数画像バッチ用API) が
+            # SAM2側の内部状態を壊すことがあるため、1枚ずつ predict (単一画像・複数箱用API) を使う。
+            for idx, image, boxes in zip(sam_indices, sam_images, sam_boxes):
+                mask, score, _ = self.sam.predict(image, boxes)
                 all_results[idx].update(
                     {
                         "masks": mask,
                         "mask_scores": score,
                     }
                 )
-            # print(f"Predicted {len(all_results)} masks")
         return all_results
 
 
