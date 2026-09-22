@@ -9,7 +9,8 @@ lang_sam_tracker:
     image_topic: /image_raw  # 画像トピック名
 
     # Cutie (VOSマスク伝播トラッカー)
-    cutie_weights: ""             # 重みファイルパス。空なら~/.cache/cutie/に自動ダウンロード
+    cutie_model: base             # モデルアーキテクチャ: "base"(resnet50,高精度) or "small"(resnet18,軽量・高速)。どちらも既定重みを自動DL可
+    cutie_weights: ""             # 重みファイルパス。空ならcutie_modelに応じた既定重みを~/.cache/cutie/に自動ダウンロード
     cutie_max_internal_size: 480  # 内部処理解像度の最小辺(px)。↓で高速/粗い、↑で精細/遅い。480が標準
     cutie_mem_every: 5            # メモリ記銘の間隔(フレーム)。↓で頑健/メモリ増、↑で軽量
     cutie_use_long_term: true     # 長期メモリ。長時間追跡でのメモリ肥大を抑制
@@ -29,13 +30,34 @@ lang_sam_person_following:
 
 lang_sam_ground_nav:
   ros__parameters:
+    # 画像サイズ
     image_width: 640          # 画像の幅(px)。text_prompt検出に使うカメラ解像度に合わせる
     image_height: 480         # 画像の高さ(px)。ロボットの近さ判定(bbox面積比)に使用
-    ground_label: "brown ground"  # 地面追従に使うトラックのラベル(text_promptの語句と対応)
-    robot_label: "mobile robot"   # 回避対象トラックのラベル(text_promptの語句と対応)
-    linear_speed: 0.2             # 通常走行時の並進速度(m/s)
-    kp_angular_ground: 0.002      # 地面追従: bbox中心オフセット→角速度の比例ゲイン
+
+    # 検出ラベル(text_promptの語句と対応)
+    ground_label: "brown ground"  # 地面追従に使うトラックのラベル
+    robot_label: "mobile robot"   # 回避対象トラックのラベル
+
+    # 走行速度・操舵ゲイン
+    linear_speed: 0.5             # 通常走行時の並進速度(m/s)
+    kp_angular_ground: 0.003      # 地面追従: bbox中心オフセット→角速度の比例ゲイン
     kp_angular_avoid: 0.002       # ロボット回避: bbox中心オフセット→角速度の比例ゲイン(地面追従と逆方向)
-    avoid_area_ratio_slow: 0.05   # ロボットbboxが画面に占める面積比がこれ以上で回避(操舵+減速)を開始。未満なら無視して地面追従を継続
-    avoid_area_ratio_stop: 0.15   # これ以上で並進停止(その場で回頭のみ)
     max_angular_z: 0.6            # 角速度の上限(rad/s)。地面追従・回避の両方に適用。↓で回転を抑制
+
+    # 回避の開始・停止しきい値(ロボットbboxの面積比)
+    avoid_area_ratio_slow: 0.20   # これ以上で回避(操舵+減速)を開始。未満なら無視して地面追従を継続
+    avoid_area_ratio_stop: 0.30   # これ以上で並進停止(その場で回頭のみ)
+
+    # 回避動作(画面端へ寄せて通過)
+    avoid_edge_target_ratio: 0.2  # 画面中央側のbbox端がこの割合(画面幅比)まで端に寄るまで旋回。↓で大きく避ける
+    avoid_done_margin_ratio: 0.05 # 寄せ完了のヒステリシス幅(画面幅比)。完了後この分ずれるまで旋回に戻らない
+    avoid_pass_speed_ratio: 0.5   # 寄せ完了後・消失後の通過中の速度比(linear_speedに対する)
+    avoid_hold_sec: 0.2           # ロボットが画角から消えた後、向きを保持して前進を続ける秒数
+    avoid_smooth_alpha: 0.4       # ロボットbbox端・面積の平滑化係数(0-1)。↓で滑らか(反応は遅れる)
+
+    # 地面見失い時の挙動
+    ground_lost_grace_sec: 0.7    # 地面が見えなくなっても直前の指令を維持する猶予(秒)。超えたら停止。↑で止まりにくいが、見失い時の停止が遅れる
+
+    # 指令のスルーレート制限(ガタつき防止)
+    max_linear_accel: 0.5         # 並進速度の変化率上限(m/s^2)。↓で滑らか
+    max_angular_accel: 2.0        # 角速度の変化率上限(rad/s^2)

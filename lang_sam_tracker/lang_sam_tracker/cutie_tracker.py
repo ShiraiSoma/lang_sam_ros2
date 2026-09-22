@@ -19,8 +19,17 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import open_dict
 
-CUTIE_WEIGHTS_URL = "https://github.com/hkchengrex/Cutie/releases/download/v1.0/cutie-base-mega.pth"
-DEFAULT_WEIGHTS_PATH = os.path.expanduser("~/.cache/cutie/cutie-base-mega.pth")
+CUTIE_MODEL_ASSETS = {
+    # model_variant -> (公式配布の重みURL, 既定の保存先)
+    "base": (
+        "https://github.com/hkchengrex/Cutie/releases/download/v1.0/cutie-base-mega.pth",
+        os.path.expanduser("~/.cache/cutie/cutie-base-mega.pth"),
+    ),
+    "small": (
+        "https://github.com/hkchengrex/Cutie/releases/download/v1.0/cutie-small-mega.pth",
+        os.path.expanduser("~/.cache/cutie/cutie-small-mega.pth"),
+    ),
+}
 
 
 class CutieTracker:
@@ -32,6 +41,7 @@ class CutieTracker:
 
     def __init__(self,
                  device: str = "cuda",
+                 model_variant: str = "base",
                  weights_path: str | None = None,
                  max_internal_size: int = 480,
                  mem_every: int = 5,
@@ -44,10 +54,21 @@ class CutieTracker:
         self.device = device
         self.use_amp = use_amp and str(device).startswith("cuda")
 
-        weights_path = weights_path or DEFAULT_WEIGHTS_PATH
-        if not os.path.exists(weights_path):
-            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
-            torch.hub.download_url_to_file(CUTIE_WEIGHTS_URL, weights_path)
+        if weights_path:
+            # 明示指定時は自動DLしない(存在しないパスへの誤ダウンロードを防ぐ)
+            if not os.path.exists(weights_path):
+                raise FileNotFoundError(
+                    f"cutie_weightsで指定された重みファイルが見つかりません: {weights_path}")
+        else:
+            if model_variant not in CUTIE_MODEL_ASSETS:
+                raise ValueError(
+                    f"model_variant='{model_variant}' の既定重みは同梱されていません。"
+                    f" 利用可能: {list(CUTIE_MODEL_ASSETS.keys())}。"
+                    " cutie_weightsパラメータで重みファイルパスを明示してください。")
+            url, weights_path = CUTIE_MODEL_ASSETS[model_variant]
+            if not os.path.exists(weights_path):
+                os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+                torch.hub.download_url_to_file(url, weights_path)
 
         config_dir = os.path.join(list(cutie_pkg.__path__)[0], "config")
         gh = GlobalHydra.instance()
@@ -56,7 +77,7 @@ class CutieTracker:
         try:
             with initialize_config_dir(version_base="1.3.2", config_dir=config_dir,
                                        job_name="cutie_streaming"):
-                cfg = compose(config_name="eval_config")
+                cfg = compose(config_name="eval_config", overrides=[f"model={model_variant}"])
         finally:
             # sam2等が初期化していたグローバル状態を復元
             # (hydraのコンテキストマネージャはGlobalHydraシングルトン自体を

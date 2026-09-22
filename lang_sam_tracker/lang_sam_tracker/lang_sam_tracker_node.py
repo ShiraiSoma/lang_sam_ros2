@@ -38,6 +38,7 @@ class LangSamTrackerNode(Node):
         # 検出マスクをメモリに記銘し、毎フレームのマスクを伝播で更新する
         self.cutie = CutieTracker(
             device=self.device,
+            model_variant=self.cutie_model,
             weights_path=(self.cutie_weights or None),
             max_internal_size=self.cutie_max_internal_size,
             mem_every=self.cutie_mem_every,
@@ -98,7 +99,8 @@ class LangSamTrackerNode(Node):
         self.declare_parameter('image_topic', '/camera/image_raw')
 
         # Cutie(VOS)のROSパラメータ
-        self.declare_parameter('cutie_weights', '')              # 空なら~/.cache/cutie/へ自動ダウンロード
+        self.declare_parameter('cutie_model', 'base')             # モデルアーキテクチャ: "base"(高精度) or "small"(軽量・高速)
+        self.declare_parameter('cutie_weights', '')              # 空ならcutie_modelに応じた既定重みを~/.cache/cutie/へ自動ダウンロード
         self.declare_parameter('cutie_max_internal_size', 480)   # 内部処理の最小辺(px)。小さいほど速い/粗い
         self.declare_parameter('cutie_mem_every', 5)              # メモリ記銘の間隔(フレーム)
         self.declare_parameter('cutie_use_long_term', True)       # 長期メモリ(長時間の追跡でメモリ量を抑制)
@@ -119,6 +121,7 @@ class LangSamTrackerNode(Node):
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
         # Cutieパラメータの取得
+        self.cutie_model = self.get_parameter('cutie_model').get_parameter_value().string_value
         self.cutie_weights = self.get_parameter('cutie_weights').get_parameter_value().string_value
         self.cutie_max_internal_size = int(self.get_parameter('cutie_max_internal_size').get_parameter_value().integer_value)
         self.cutie_mem_every = int(self.get_parameter('cutie_mem_every').get_parameter_value().integer_value)
