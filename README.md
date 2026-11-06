@@ -9,7 +9,7 @@
 | `lang_sam_detector` | LangSAM(GroundingDINO+SAM2)による検出専用ノード。GPU負荷が大きい。 |
 | `lang_sam_tracker` | Cutie(VOS)によるマスク伝播トラッキングノード。検出結果を初期値に毎フレーム追跡する。GPU使用。 |
 | `lang_sam_client` | ロボット側で動くクライアント。カメラ画像をJPEG圧縮して追跡ノードへ送り、返ってきた検出・追跡結果を手元で描画・表示する。GPU不要。 |
-| `lang_sam_person_following` | トラッキング結果を使った人追従制御ノード。 |
+| `lang_sam_person_following` | トラッキング結果を使った人追従制御ノード(`/cmd_vel`)。現在は使わないため、どのlaunchからも起動しない。 |
 | `lang_sam_msgs` | 検出・トラック情報を表すカスタムメッセージ定義。 |
 | `lang_sam_executor` | 各構成向けのlaunchファイル・パラメータ(`config/params.yaml`)と、検出+追跡を1プロセスで起動するサーバー(`lang_sam_server_node.py`)をまとめたパッケージ。 |
 | `docker/` | GPGPU計算機(gpumng2)上でLangSAM検出+Cutie追跡をリモート実行するための一式(後述)。 |
@@ -19,7 +19,6 @@
 [ロボット側]                                      [GPU側]
 camera ─▶ lang_sam_client ── /lang_sam/frame (JPEG) ──▶ lang_sam_tracker (Cutie) ◀─▶ lang_sam_detector (LangSAM)
           (描画・表示)    ◀── /lang_sam/tracks, /lang_sam/track_mask (PNG), /lang_sam/detections ──
-lang_sam_person_following ◀── /lang_sam/tracks
 ```
 結果には送信したフレームと同じ`header.stamp`が付いて返ってくるので、クライアントは手元に保持している元フレームに結果を重ねて表示します(結果画像そのものは転送しません)。
 
@@ -62,7 +61,7 @@ export ROS_DOMAIN_ID=<両PC共通のID>
 ros2 launch lang_sam_executor lang_sam_server.launch.py
 ```
 
-ロボット側PC(`lang_sam_client`, `lang_sam_person_following`):
+ロボット側PC(`lang_sam_client`):
 ```bash
 export ROS_DOMAIN_ID=<両PC共通のID>
 ros2 launch lang_sam_executor lang_sam_client.launch.py

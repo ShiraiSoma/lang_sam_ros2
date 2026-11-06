@@ -42,18 +42,9 @@ def generate_launch_description():
         parameters=[params_file]
     )
 
-    # LangSAM Person Followingノードの起動設定
-    lang_sam_person_following_node = Node(
-        package='lang_sam_person_following',
-        executable='lang_sam_person_following_node',
-        name='lang_sam_person_following',
-        output='screen',
-        parameters=[params_file]
-    )
 
     return LaunchDescription([
         lang_sam_detector_node,
         lang_sam_tracker_node,
         lang_sam_client_node,
-        lang_sam_person_following_node
     ])

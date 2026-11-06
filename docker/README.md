@@ -10,12 +10,12 @@ lang_sam_client(フレーム送信・結果表示)                lang_sam_serve
    │ frame(JPEG圧縮画像・毎フレーム) ──[TCP]──▶          lang_sam_tracker(Cutie追跡)
    │ tracks / track_mask(PNG)      ◀──[TCP]──              ▲ detect_request / detections
    │ detections(左パネル表示用)     ◀──[TCP]──              ▼
-lang_sam_person_following ◀── tracks                     lang_sam_detector(LangSAM検出)
+                                                         lang_sam_detector(LangSAM検出)
 ```
 
 - `lang_sam_detector`と`lang_sam_tracker`をgpumng2の計算ノード上でSlurmジョブとして動かす
 - 2ノードは同一プロセスで起動する(1つのDDSパーティシパントを共有するため、待ち受けポート1つで両ノードのトピックを公開できる)
-- ロボットPC側は`lang_sam_client` + `lang_sam_person_following`。結果は送信時と同じ`header.stamp`で返るので、手元に保持した元フレームに重ねて描画する
+- ロボットPC側は`lang_sam_client`。結果は送信時と同じ`header.stamp`で返るので、手元に保持した元フレームに重ねて描画する
 - 両者はFast-DDSのTCPトランスポート(マルチキャスト不使用)で直接ROS 2トピック通信する
 
 ### なぜ通常のROS 2構成(README記載の「2台構成」)ではダメなのか
@@ -50,7 +50,7 @@ SSHパスワードの入力は最初の1回だけです(接続を使い回しま
 ```bash
 ./docker/connect_client.sh <表示されたIP>
 ```
-`~/venv/lang_sam`を有効化し、`lang_sam_client` + `lang_sam_person_following`を起動します。左に検出結果、右に追跡結果を並べたウィンドウが表示されます。
+`~/venv/lang_sam`を有効化し、`lang_sam_client`を起動します。左に検出結果、右に追跡結果を並べたウィンドウが表示されます。
 
 ### 3. 終了
 - ロボット側: `Ctrl+C`
