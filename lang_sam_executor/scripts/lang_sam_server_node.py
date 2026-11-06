@@ -19,6 +19,8 @@ def main(args=None):
     rclpy.init(args=args)
     detector = LangSamDetectorNode()
     tracker = LangSamTrackerNode()
+    # このターミナルでEnterを押すと検出の認識対象(text_prompt)を切り替える
+    detector.start_keyboard_thread()
 
     # 検出(数百ms〜)が毎フレームの追跡を止めないよう、ノードごとに並列実行する
     executor = MultiThreadedExecutor()

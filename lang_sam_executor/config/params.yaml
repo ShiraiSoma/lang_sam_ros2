@@ -2,7 +2,12 @@
 lang_sam_detector:
   ros__parameters:
     sam_model: sam2.1_hiera_small
-    text_prompt: "mobile robot. green box. blue box."
+    text_prompt: "mobile robot. green pylon."   # 常に検出する対象
+    # 認識対象の切り替え: サーバーを起動したターミナルでEnterを押すたびに順に付け替える(末尾の次は先頭)
+    text_prompt_stages:
+      - ""                                         # 0: 起動時 / 3回目以降(text_promptのみ)
+      - "green box. blue box."                     # 1回目
+      - "green traffic light. red traffic light."  # 2回目
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     request_topic: /lang_sam/detect_request
@@ -32,19 +37,19 @@ lang_sam_tracker:
     # トラック管理 (再検出とのマージ規則)
     merge_iou_threshold: 0.1          # 検出マスクと既存トラックを同一とみなすIoU。↑で厳格(ID分裂しやすい)、↓で緩い(誤マージ増)
     duplicate_overlap_threshold: 0.5  # 同一物体の多重登録とみなす重なり率(交差/小さい方の面積)。検出同士・新規vs既存の両方に適用。↓で厳格(重複減)
-    track_max_detection_misses: 1     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
+    track_max_detection_misses: 0     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
     track_lost_frames: 10             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
     track_min_mask_area: 100          # これ未満の面積(px)のマスクは消失扱い(多重登録の残骸や誤伝播を淘汰)
 
 # ロボット側PCで起動: lang_sam_client.launch.py
 lang_sam_client:
   ros__parameters:
-    image_topic: /image_raw                    # カメラ画像トピック名
+    image_topic: /usb_cam/image_raw                    # カメラ画像トピック名
     frame_topic: /lang_sam/frame               # lang_sam_trackerへ送るJPEGフレーム
     tracks_topic: /lang_sam/tracks
     track_mask_topic: /lang_sam/track_mask
     detections_topic: /lang_sam/detections     # 検出結果(左パネルの表示用)
-    jpeg_quality: 85                           # 送信JPEG品質。↓で通信量減/追跡精度低下
+    jpeg_quality: 70                           # 送信JPEG品質。↓で通信量減/追跡精度低下
     stream_max_fps: 0.0                        # 送信フレームレート上限。0で無制限(カメラのレート)。回線が細い場合に下げる
     frame_buffer_size: 300                     # 結果と対応付けるため保持する送信済みフレーム数(遅延が大きい場合は増やす)
     visualize: true                            # 結果ウィンドウを表示するか

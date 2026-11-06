@@ -6,6 +6,7 @@ detect_requestトピックで届いた1枚の画像に対して検出を行い�
 detections(DetectionArray)としてそのまま返す。時刻同期は行わず、
 リクエストのheader.stampをそのまま応答へコピーして相関を取る。
 """
+import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -63,6 +64,8 @@ class LangSamDetectorNode(Node):
         self.get_logger().info(f'Using device: {self.device}')
         self.get_logger().info(f'Using SAM model: {self.sam_model}')
         self.get_logger().info(f'Using text prompt: {self.text_prompt}')
+        if len(self.text_prompt_stages) > 1:
+            self.get_logger().info(f'Prompt stages (Enterで切り替え): {self.text_prompt_stages}')
         self.get_logger().info(f'Request topic: {self.request_topic}')
         self.get_logger().info(f'Response topic: {self.response_topic}')
         self.get_logger().info(f'Lite topic (for client): {self.lite_topic}')
@@ -96,9 +99,16 @@ class LangSamDetectorNode(Node):
         self.declare_parameter('lite_topic', '/lang_sam/detections_lite')     # マスク抜きの検出結果(クライアント表示用)
         self.declare_parameter('mask_topic', '/lang_sam/detection_mask')      # 検出マスク(16bit PNG, クライアント表示用)
         self.declare_parameter('visualize', True)
+        # 認識対象の切り替え: text_promptは常に検出し、Enterを押すたびにstagesを順に付け足す
+        # (末尾の次は先頭に戻る。空文字のステージはtext_promptのみ)
+        self.declare_parameter('text_prompt_stages', [''])
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
-        self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
+        self.text_prompt_base = self.get_parameter('text_prompt').get_parameter_value().string_value
+        self.text_prompt_stages = list(
+            self.get_parameter('text_prompt_stages').get_parameter_value().string_array_value) or ['']
+        self.prompt_stage = 0
+        self.text_prompt = self._compose_prompt()
         self.box_threshold = self.get_parameter('box_threshold').get_parameter_value().double_value
         self.text_threshold = self.get_parameter('text_threshold').get_parameter_value().double_value
         self.request_topic = self.get_parameter('request_topic').get_parameter_value().string_value
@@ -106,6 +116,33 @@ class LangSamDetectorNode(Node):
         self.lite_topic = self.get_parameter('lite_topic').get_parameter_value().string_value
         self.mask_topic = self.get_parameter('mask_topic').get_parameter_value().string_value
         self.visualize = self.get_parameter('visualize').get_parameter_value().bool_value
+
+    # --- 認識対象(プロンプト)の切り替え ---
+    def _compose_prompt(self):
+        extra = self.text_prompt_stages[self.prompt_stage].strip()
+        return ' '.join(p for p in (self.text_prompt_base.strip(), extra) if p)
+
+    def next_prompt_stage(self):
+        self.prompt_stage = (self.prompt_stage + 1) % len(self.text_prompt_stages)
+        # 文字列の差し替えは原子的なので、実行中の検出は旧プロンプトのまま完了し次回から反映される
+        self.text_prompt = self._compose_prompt()
+        self.logger.info(
+            f'認識対象を切り替えました [{self.prompt_stage}/{len(self.text_prompt_stages) - 1}]: {self.text_prompt}')
+
+    def start_keyboard_thread(self):
+        """起動したターミナルでEnterが押されるたびに認識対象を切り替える。
+        標準入力が端末でない場合(Slurmのバッチジョブ、ros2 launch経由など)は何もしない。
+        """
+        if not sys.stdin or not sys.stdin.isatty():
+            self.logger.info('標準入力が端末でないため、Enterでの認識対象切り替えは無効です')
+            return
+
+        def loop():
+            for _line in sys.stdin:
+                self.next_prompt_stage()
+
+        threading.Thread(target=loop, daemon=True).start()
+        self.logger.info('Enterで認識対象を切り替えられます')
 
     @staticmethod
     def _to_numpy(x):
@@ -235,6 +272,7 @@ class LangSamDetectorNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = LangSamDetectorNode()
+    node.start_keyboard_thread()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
