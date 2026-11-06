@@ -24,9 +24,10 @@ private:
 
   // labelにkeyword(小文字)が含まれるか大小文字を無視して判定
   static bool labelContains(const std::string &label, const std::string &keyword);
-  // keywordを含むトラックのうちbbox面積が最大のものを返す(無ければnullptr)
+  // keywordを含み、excludesのいずれも含まないトラックのうちbbox面積が最大のものを返す(無ければnullptr)
   static const lang_sam_msgs::msg::Track * findLargest(
-    const lang_sam_msgs::msg::TrackArray &msg, const std::string &keyword);
+    const lang_sam_msgs::msg::TrackArray &msg, const std::string &keyword,
+    const std::vector<std::string> &excludes = {});
   // 地面の追従目標x座標を求める(ground_target_modeに応じてbbox中心 or マスク下部の重心)
   double groundTargetX(const lang_sam_msgs::msg::Track &ground, const cv::Mat &idx_mask) const;
 

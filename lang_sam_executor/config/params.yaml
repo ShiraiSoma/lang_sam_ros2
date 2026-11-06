@@ -14,7 +14,7 @@ lang_sam_detector:
 # リモートPC(GPU)で起動: lang_sam_server.launch.py (detector + trackerを1プロセスで)
 lang_sam_tracker:
   ros__parameters:
-    detection_interval_sec: 2.0   # 検出リクエスト送信間隔(秒)。↓で頻繁に再検出(通信・計算増=ドリフト矯正頻度↑)
+    detection_interval_sec: 1.0   # 検出リクエスト送信間隔(秒)。↓で頻繁に再検出(通信・計算増=ドリフト矯正頻度↑)。新しく映ったパイロンに気づくまでの遅れもこれで決まる
     frame_topic: /lang_sam/frame               # lang_sam_clientから受け取るJPEGフレーム
     tracks_topic: /lang_sam/tracks             # 追跡結果(TrackArray)
     track_mask_topic: /lang_sam/track_mask     # 追跡結果のインデックスマスク(16bit PNG)
@@ -65,14 +65,15 @@ lang_sam_ground_nav:
     # 同じラベルのトラックが複数ある場合はbbox面積が最大のものを使う
     ground_label: "red ground"    # 地面追従に使うトラックのラベル
     obstacle_label: "green pylon" # 回避対象トラックのラベル
+    ground_exclude_keywords: ["pylon"]  # これを含むラベルは地面の候補から除外("red ground pylon"のような地面と障害物をまとめた誤ラベル対策)
 
     # 地面の追従目標
-    ground_target_mode: "bbox_center"  # "bbox_center"=地面bboxの中心 / "mask_bottom"=地面マスクの下部(ロボットに近い側)の重心。曲がった通路ではmask_bottomが有利
+    ground_target_mode: "mask_bottom"  # "bbox_center"=地面bboxの中心 / "mask_bottom"=地面マスクの下部(ロボットに近い側)の重心。曲がった通路ではmask_bottomが有利
     ground_bottom_ratio: 0.3           # mask_bottom: 地面bboxの下からこの割合の高さの帯の画素を使う。↓で足元重視
     ground_bottom_min_pixels: 200      # mask_bottom: 帯内の地面画素がこれ未満ならbbox中心にフォールバック
 
     # 走行速度・操舵ゲイン
-    linear_speed: 0.5             # 通常走行時の並進速度(m/s)
+    linear_speed: 0.5             # 通常走行時の並進速度(m/s)。パイロンは次の再検出(最大detection_interval_sec)+処理遅れの後に初めて認識されるため、速すぎると回避が間に合わない
     kp_angular_ground: 0.003      # 地面追従: 目標位置の画面中心からのずれ(px)→角速度の比例ゲイン
     kp_angular_avoid: 0.002       # 障害物回避: 寄せ残り(px)→角速度の比例ゲイン
     max_angular_z: 0.6            # 角速度の上限(rad/s)。地面追従・回避の両方に適用。↓で回転を抑制

@@ -82,14 +82,14 @@ ros2 launch lang_sam_executor lang_sam_client.launch.py
 ```
 
 ### 4. 地面追従+障害物回避をリモートPCで行う場合(ロボット側はROS1)
-検出・追跡に加えて、地面追従+障害物回避(`lang_sam_ground_nav`)もリモートPCで動かし、`/cmd_vel`だけを
+検出・追跡に加えて、地面追従+障害物回避(`lang_sam_ground_nav`)もリモートPCで動かし、速度指令だけを
 ロボットへ送る構成です。ロボット側(ROS1 Noetic)は[lang_sam_ros1](https://github.com/ShiraiSoma/lang_sam_ros1)の
-`lang_sam_client`のみ起動し、`/cmd_vel`を含むトピックは`ros1_bridge`(`parameter_bridge`)で中継します。
+`lang_sam_client`のみ起動し、速度指令を含むトピックは`ros1_bridge`(`parameter_bridge`)で中継します。
 
 リモートPC:
 ```bash
 export ROS_DOMAIN_ID=<ブリッジと共通のID>
-ros2 launch lang_sam_executor lang_sam_ground_nav.launch.py   # detector + tracker + ground_nav
+ros2 launch lang_sam_executor lang_sam_ground_nav.launch.py   # detector + tracker + ground_nav (/icart_mini/cmd_velへ出力)
 ```
 
 - 検出対象は`lang_sam_detector`の`text_prompt`(既定: `"red ground. green pylon."`)、追従/回避に使うラベルは
@@ -99,6 +99,8 @@ ros2 launch lang_sam_executor lang_sam_ground_nav.launch.py   # detector + track
   下部(ロボットに近い側)の重心です。曲がった通路では`mask_bottom`の方が足元の向きに沿って曲がります。
 - `tracks_timeout_sec`(既定0.5秒)の間`/lang_sam/tracks`が届かなければ停止指令を出します。ただし通信そのものが
   切れた場合はロボットに届かないため、足回り側にも指令タイムアウトでの停止機能があることが望ましいです。
+- 速度指令の出力先は既定で`/icart_mini/cmd_vel`(ORNE-box/iCart miniの足回りが購読するトピック)です。
+  別のロボットでは`cmd_vel_topic:=/cmd_vel`のように指定し、`lang_sam_ros1`の`bridge/bridge_topics.yaml`も合わせてください。
 - `lang_sam_person_following`も`/cmd_vel`を出すので、同時に起動しないでください。
 
 ---

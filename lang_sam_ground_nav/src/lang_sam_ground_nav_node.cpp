@@ -12,6 +12,9 @@ GroundNavNode::GroundNavNode()
   declare_parameter<int>("image_height", 480);
   declare_parameter<std::string>("ground_label", "red ground");
   declare_parameter<std::string>("obstacle_label", "green pylon");
+  // 地面の候補から除外するキーワード。GroundingDINOが"red ground pylon"のように地面と障害物を
+  // まとめたラベルを返すことがあり、それを(bboxが大きいため)地面として選ばないようにする
+  declare_parameter<std::vector<std::string>>("ground_exclude_keywords", std::vector<std::string>{"pylon"});
   // 地面の追従目標: "bbox_center"=bbox中心 / "mask_bottom"=マスク下部(ロボットに近い側)の重心
   declare_parameter<std::string>("ground_target_mode", "bbox_center");
   declare_parameter<double>("ground_bottom_ratio", 0.3);       // mask_bottom: 地面bboxの下からこの割合の高さの帯を使う
@@ -59,12 +62,15 @@ bool GroundNavNode::labelContains(const std::string &label, const std::string &k
 }
 
 const lang_sam_msgs::msg::Track * GroundNavNode::findLargest(
-  const lang_sam_msgs::msg::TrackArray &msg, const std::string &keyword)
+  const lang_sam_msgs::msg::TrackArray &msg, const std::string &keyword,
+  const std::vector<std::string> &excludes)
 {
   const lang_sam_msgs::msg::Track *best = nullptr;
   long best_area = -1;
   for (const auto &t : msg.tracks) {
     if (!labelContains(t.label, keyword)) continue;
+    if (std::any_of(excludes.begin(), excludes.end(),
+        [&t](const std::string &ex) { return labelContains(t.label, ex); })) continue;
     const long area = static_cast<long>(t.x_max - t.x_min) * static_cast<long>(t.y_max - t.y_min);
     if (area > best_area) {
       best = &t;
@@ -190,7 +196,9 @@ void GroundNavNode::process(const lang_sam_msgs::msg::TrackArray &msg, const cv:
   const double ground_grace = get_parameter("ground_lost_grace_sec").as_double();
 
   // 地面/障害物のトラックをラベルで検索(複数あればbbox面積が最大のもの)
-  const lang_sam_msgs::msg::Track *ground_track = findLargest(msg, ground_label);
+  // 地面は障害物とまとめられたラベル(例: "red ground pylon")を除外する
+  const lang_sam_msgs::msg::Track *ground_track =
+    findLargest(msg, ground_label, get_parameter("ground_exclude_keywords").as_string_array());
   const lang_sam_msgs::msg::Track *obstacle_track = findLargest(msg, obstacle_label);
 
   const auto clamp_ang = [max_ang](double v) { return std::max(-max_ang, std::min(max_ang, v)); };
