@@ -10,6 +10,7 @@ cutie.utils.get_default_model は使えない(initialize()が衝突する)。
 ここではGlobalHydraを手動で退避→クリアしてCutieのcfgを合成し、
 終了後にsam2側の状態を復元する。
 """
+import logging
 import os
 
 import cv2
@@ -21,6 +22,15 @@ from omegaconf import open_dict
 
 CUTIE_WEIGHTS_URL = "https://github.com/hkchengrex/Cutie/releases/download/v1.0/cutie-base-mega.pth"
 DEFAULT_WEIGHTS_PATH = os.path.expanduser("~/.cache/cutie/cutie-base-mega.pth")
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if torch.backends.mps.is_available():
+        return torch.device('mps')
+    logging.warning('No GPU found, using CPU instead')
+    return torch.device('cpu')
 
 
 class CutieTracker:

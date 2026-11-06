@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""単一マシンで全ノード(検出+追跡+追従)をまとめて起動する動作確認用launch。
+"""単一マシンで全ノード(検出+追跡+クライアント+追従)をまとめて起動する動作確認用launch。
 
-2台構成で実運用する場合は lang_sam_detector.launch.py (リモートPC) と
-lang_sam_tracker.launch.py (ロボット側PC) を別々に使うこと。
+2台構成で実運用する場合は lang_sam_server.launch.py (リモートPC) と
+lang_sam_client.launch.py (ロボット側PC) を別々に使うこと。
 """
 
 import os
@@ -33,6 +33,15 @@ def generate_launch_description():
         parameters=[params_file]
     )
 
+    # LangSAM Clientノードの起動設定(フレーム送信・結果表示)
+    lang_sam_client_node = Node(
+        package='lang_sam_client',
+        executable='lang_sam_client_node.py',
+        name='lang_sam_client',
+        output='screen',
+        parameters=[params_file]
+    )
+
     # LangSAM Person Followingノードの起動設定
     lang_sam_person_following_node = Node(
         package='lang_sam_person_following',
@@ -45,5 +54,6 @@ def generate_launch_description():
     return LaunchDescription([
         lang_sam_detector_node,
         lang_sam_tracker_node,
+        lang_sam_client_node,
         lang_sam_person_following_node
     ])

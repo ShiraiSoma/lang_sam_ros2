@@ -7,14 +7,22 @@
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
 #SBATCH --job-name=lang_sam_server
-#SBATCH --container=gpumng2.cle.it-chiba.ac.jp/u23c1070/lang_sam_server:1.6
+#SBATCH --container=gpumng2.cle.it-chiba.ac.jp/u23c1070/lang_sam_server:1.7
 
 echo "NODE_IP: $(hostname -I)"
+# 割り当てられたGPUとドライバのバージョン(CUDAの互換性確認用)
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv || true
 
-# 検出パラメータを変更したい場合はここで上書き(コメントアウトを外す)
+# パラメータを変更したい場合はここで上書き(コメントアウトを外す)
+# 未設定のものはイメージ同梱のparams.yamlの値が使われる
+# 検出(lang_sam_detector)
 # export SAM_MODEL="sam2.1_hiera_small"
 # export TEXT_PROMPT="blue cup."
 # export BOX_THRESHOLD="0.3"
 # export TEXT_THRESHOLD="0.25"
+# 追跡(lang_sam_tracker / Cutie)
+# export DETECTION_INTERVAL_SEC="2.0"
+# export CUTIE_MAX_INTERNAL_SIZE="480"
+# export CUTIE_USE_AMP="true"
 
 bash /opt/lang_sam_ws/docker/entrypoint.sh

@@ -55,12 +55,18 @@ class LangSamDetectorNode(Node):
         self.request_sub = self.create_subscription(
             CompressedImage, self.request_topic, self._on_request, qos)
         self.detections_pub = self.create_publisher(DetectionArray, self.response_topic, qos)
+        # クライアント(表示用)向け: response_topicのindex_maskは非圧縮(640x480で約600KB)で
+        # 回線越しには重いため、マスクを空にしたDetectionArrayと16bit PNGのマスクに分けて送る
+        self.detections_lite_pub = self.create_publisher(DetectionArray, self.lite_topic, qos)
+        self.detection_mask_pub = self.create_publisher(CompressedImage, self.mask_topic, qos)
 
         self.get_logger().info(f'Using device: {self.device}')
         self.get_logger().info(f'Using SAM model: {self.sam_model}')
         self.get_logger().info(f'Using text prompt: {self.text_prompt}')
         self.get_logger().info(f'Request topic: {self.request_topic}')
         self.get_logger().info(f'Response topic: {self.response_topic}')
+        self.get_logger().info(f'Lite topic (for client): {self.lite_topic}')
+        self.get_logger().info(f'Mask topic (for client): {self.mask_topic}')
         self.get_logger().info('LangSAM Detector initialized.')
 
     def _warmup(self):
@@ -87,6 +93,8 @@ class LangSamDetectorNode(Node):
         self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('request_topic', '/lang_sam/detect_request')
         self.declare_parameter('response_topic', '/lang_sam/detections')
+        self.declare_parameter('lite_topic', '/lang_sam/detections_lite')     # マスク抜きの検出結果(クライアント表示用)
+        self.declare_parameter('mask_topic', '/lang_sam/detection_mask')      # 検出マスク(16bit PNG, クライアント表示用)
         self.declare_parameter('visualize', True)
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
@@ -95,6 +103,8 @@ class LangSamDetectorNode(Node):
         self.text_threshold = self.get_parameter('text_threshold').get_parameter_value().double_value
         self.request_topic = self.get_parameter('request_topic').get_parameter_value().string_value
         self.response_topic = self.get_parameter('response_topic').get_parameter_value().string_value
+        self.lite_topic = self.get_parameter('lite_topic').get_parameter_value().string_value
+        self.mask_topic = self.get_parameter('mask_topic').get_parameter_value().string_value
         self.visualize = self.get_parameter('visualize').get_parameter_value().bool_value
 
     @staticmethod
@@ -204,6 +214,22 @@ class LangSamDetectorNode(Node):
         msg.index_mask = self.bridge.cv2_to_imgmsg(idx_mask, encoding='mono16')
         msg.index_mask.header = header
         self.detections_pub.publish(msg)
+
+        # クライアント向け(表示用): マスク抜きの検出結果 + PNG圧縮マスク(stampで対応付ける)
+        lite_msg = DetectionArray()
+        lite_msg.header = header
+        lite_msg.detections = msg.detections
+        self.detections_lite_pub.publish(lite_msg)
+
+        ok, png = cv2.imencode('.png', idx_mask)
+        if not ok:
+            self.get_logger().warning('検出マスクのPNGエンコードに失敗しました')
+            return
+        mask_msg = CompressedImage()
+        mask_msg.header = header
+        mask_msg.format = 'mono16; png compressed'
+        mask_msg.data = png.tobytes()
+        self.detection_mask_pub.publish(mask_msg)
 
 
 def main(args=None):

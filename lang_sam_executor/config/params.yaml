@@ -1,19 +1,24 @@
-# リモートPC(GPU)で起動: lang_sam_detector.launch.py
+# リモートPC(GPU)で起動: lang_sam_server.launch.py (detector + trackerを1プロセスで)
 lang_sam_detector:
   ros__parameters:
     sam_model: sam2.1_hiera_small
-    text_prompt: "red pylon."
+    text_prompt: "mobile robot. green box. blue box."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     request_topic: /lang_sam/detect_request
     response_topic: /lang_sam/detections
+    lite_topic: /lang_sam/detections_lite     # マスク抜きの検出結果(クライアント表示用。ros1_bridge/回線越しに送る)
+    mask_topic: /lang_sam/detection_mask      # 検出マスク(16bit PNG。response_topicの非圧縮マスクの代わりにクライアントへ送る)
+    visualize: false              # 検出ノード自身のウィンドウ表示。結果はlang_sam_clientで表示するため通常は不要
 
-# ロボット側PCで起動: lang_sam_tracker.launch.py
+# リモートPC(GPU)で起動: lang_sam_server.launch.py (detector + trackerを1プロセスで)
 lang_sam_tracker:
   ros__parameters:
     detection_interval_sec: 2.0   # 検出リクエスト送信間隔(秒)。↓で頻繁に再検出(通信・計算増=ドリフト矯正頻度↑)
-    image_topic: /image_raw        # 画像トピック名
-    detect_request_topic: /lang_sam/detect_request   # lang_sam_detectorへ送るトピック(要 同一ROS_DOMAIN_ID)
+    frame_topic: /lang_sam/frame               # lang_sam_clientから受け取るJPEGフレーム
+    tracks_topic: /lang_sam/tracks             # 追跡結果(TrackArray)
+    track_mask_topic: /lang_sam/track_mask     # 追跡結果のインデックスマスク(16bit PNG)
+    detect_request_topic: /lang_sam/detect_request   # lang_sam_detectorへ送るトピック
     detect_response_topic: /lang_sam/detections       # lang_sam_detectorから受け取るトピック
     detect_timeout_multiplier: 3.0  # 検出応答タイムアウト = detection_interval_sec × この倍率
 
@@ -27,9 +32,22 @@ lang_sam_tracker:
     # トラック管理 (再検出とのマージ規則)
     merge_iou_threshold: 0.1          # 検出マスクと既存トラックを同一とみなすIoU。↑で厳格(ID分裂しやすい)、↓で緩い(誤マージ増)
     duplicate_overlap_threshold: 0.5  # 同一物体の多重登録とみなす重なり率(交差/小さい方の面積)。検出同士・新規vs既存の両方に適用。↓で厳格(重複減)
-    track_max_detection_misses: 3     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
-    track_lost_frames: 90             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
+    track_max_detection_misses: 1     # 再検出で連続この回数裏付けがないトラックを削除(3回×2秒=約6秒)
+    track_lost_frames: 10             # 伝播マスクが空のままこのフレーム数を超えたら削除(遮蔽・画面外対策)
     track_min_mask_area: 100          # これ未満の面積(px)のマスクは消失扱い(多重登録の残骸や誤伝播を淘汰)
+
+# ロボット側PCで起動: lang_sam_client.launch.py
+lang_sam_client:
+  ros__parameters:
+    image_topic: /image_raw                    # カメラ画像トピック名
+    frame_topic: /lang_sam/frame               # lang_sam_trackerへ送るJPEGフレーム
+    tracks_topic: /lang_sam/tracks
+    track_mask_topic: /lang_sam/track_mask
+    detections_topic: /lang_sam/detections     # 検出結果(左パネルの表示用)
+    jpeg_quality: 85                           # 送信JPEG品質。↓で通信量減/追跡精度低下
+    stream_max_fps: 0.0                        # 送信フレームレート上限。0で無制限(カメラのレート)。回線が細い場合に下げる
+    frame_buffer_size: 300                     # 結果と対応付けるため保持する送信済みフレーム数(遅延が大きい場合は増やす)
+    visualize: true                            # 結果ウィンドウを表示するか
 
 lang_sam_person_following:
   ros__parameters:

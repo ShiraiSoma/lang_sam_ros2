@@ -1,23 +1,11 @@
-"""可視化・デバイス選択ユーティリティ
+"""可視化ユーティリティ
 
-元々はLangSAM本体(lang_sam.utils / lang_sam.models.utils)に含まれていたが、
-LangSAM本体はlang_sam_detectorパッケージ(リモートPC)へ移設したため、
-Cutieトラッキング側の可視化に必要な最小限のみここに複製する。
+元々はLangSAM本体(lang_sam.utils)に含まれていたが、推論はリモート側で行い
+描画のみをクライアント(ロボット側PC)で行うため、必要最小限をここに複製する。
+torchに依存しないので、クライアント側にGPU・推論環境は不要。
 """
-import logging
-
 import numpy as np
 import supervision as sv
-import torch
-
-
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device('cuda')
-    if torch.backends.mps.is_available():
-        return torch.device('mps')
-    logging.warning('No GPU found, using CPU instead')
-    return torch.device('cpu')
 
 
 def draw_image(image_rgb, masks, xyxy, probs, labels):

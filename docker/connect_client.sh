@@ -1,6 +1,6 @@
 #!/bin/bash
 # 計算ノードのIPを受け取り、TCP専用のFast-DDSプロファイルを生成してから
-# lang_sam_tracker(+person_following)をロボットPC側で起動する。
+# lang_sam_client(フレーム送信・結果表示)+person_followingをロボットPC側で起動する。
 set -e
 
 NODE_IP="${1:?Usage: $0 <compute_node_ip>}"
@@ -23,4 +23,4 @@ source /opt/ros/humble/setup.bash
 source "${WORKSPACE_SETUP}"
 source "${LANG_SAM_VENV}/bin/activate"
 
-exec ros2 launch lang_sam_executor lang_sam_tracker.launch.py
+exec ros2 launch lang_sam_executor lang_sam_client.launch.py

@@ -18,6 +18,12 @@ install(DIRECTORY
   FILES_MATCHING PATTERN "*.launch.py"
 )
 
+# Install scripts (detector + trackerを1プロセスで起動するサーバー)
+install(PROGRAMS
+  scripts/lang_sam_server_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install config files
 install(DIRECTORY
   config/
