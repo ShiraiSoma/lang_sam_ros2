@@ -10,6 +10,7 @@
 | `lang_sam_tracker` | Cutie(VOS)によるマスク伝播トラッキングノード。検出結果を初期値に毎フレーム追跡する。GPU使用。 |
 | `lang_sam_client` | ロボット側で動くクライアント。カメラ画像をJPEG圧縮して追跡ノードへ送り、返ってきた検出・追跡結果を手元で描画・表示する。GPU不要。 |
 | `lang_sam_person_following` | トラッキング結果を使った人追従制御ノード。 |
+| `lang_sam_ground_nav` | トラッキング結果を使った地面追従+障害物回避ノード(`/cmd_vel`)。リモートPC側で動かす(後述の4.)。 |
 | `lang_sam_msgs` | 検出・トラック情報を表すカスタムメッセージ定義。 |
 | `lang_sam_executor` | 各構成向けのlaunchファイル・パラメータ(`config/params.yaml`)と、検出+追跡を1プロセスで起動するサーバー(`lang_sam_server_node.py`)をまとめたパッケージ。 |
 | `docker/` | GPGPU計算機(gpumng2)上でLangSAM検出+Cutie追跡をリモート実行するための一式(後述)。 |
@@ -79,6 +80,26 @@ ros2 launch lang_sam_executor lang_sam_client.launch.py
 # 2. 表示されたIPでロボット側(フレーム送信・結果表示+追従)を起動
 ./docker/connect_client.sh <表示されたIP>
 ```
+
+### 4. 地面追従+障害物回避をリモートPCで行う場合(ロボット側はROS1)
+検出・追跡に加えて、地面追従+障害物回避(`lang_sam_ground_nav`)もリモートPCで動かし、`/cmd_vel`だけを
+ロボットへ送る構成です。ロボット側(ROS1 Noetic)は[lang_sam_ros1](https://github.com/ShiraiSoma/lang_sam_ros1)の
+`lang_sam_client`のみ起動し、`/cmd_vel`を含むトピックは`ros1_bridge`(`parameter_bridge`)で中継します。
+
+リモートPC:
+```bash
+export ROS_DOMAIN_ID=<ブリッジと共通のID>
+ros2 launch lang_sam_executor lang_sam_ground_nav.launch.py   # detector + tracker + ground_nav
+```
+
+- 検出対象は`lang_sam_detector`の`text_prompt`(既定: `"red ground. green pylon."`)、追従/回避に使うラベルは
+  `lang_sam_ground_nav`の`ground_label`/`obstacle_label`で指定します(トラックのラベルにこの文字列を含むものを使用。
+  同じラベルが複数あればbbox面積が最大のもの)。
+- 地面の追従目標は`ground_target_mode`で切り替えます。`bbox_center`は地面bboxの中心、`mask_bottom`は地面マスクの
+  下部(ロボットに近い側)の重心です。曲がった通路では`mask_bottom`の方が足元の向きに沿って曲がります。
+- `tracks_timeout_sec`(既定0.5秒)の間`/lang_sam/tracks`が届かなければ停止指令を出します。ただし通信そのものが
+  切れた場合はロボットに届かないため、足回り側にも指令タイムアウトでの停止機能があることが望ましいです。
+- `lang_sam_person_following`も`/cmd_vel`を出すので、同時に起動しないでください。
 
 ---
 

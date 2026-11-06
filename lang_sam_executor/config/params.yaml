@@ -2,7 +2,7 @@
 lang_sam_detector:
   ros__parameters:
     sam_model: sam2.1_hiera_small
-    text_prompt: "mobile robot. green box. blue box."
+    text_prompt: "red ground. green pylon."   # 地面(追従)と障害物(回避)。lang_sam_ground_navのground_label/obstacle_labelと対応させる
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     request_topic: /lang_sam/detect_request
@@ -53,3 +53,45 @@ lang_sam_person_following:
   ros__parameters:
     image_width: 640   # 画像の幅(使用)
     kp_angular: 0.002  # 角速度の比例ゲイン(使用)
+
+# リモートPC(GPU)で起動: lang_sam_ground_nav.launch.py (/cmd_velはros1_bridge経由でロボットへ)
+lang_sam_ground_nav:
+  ros__parameters:
+    # 画像サイズ
+    image_width: 640          # 画像の幅(px)。lang_sam_clientが送るフレームの解像度に合わせる
+    image_height: 480         # 画像の高さ(px)。障害物の近さ判定(bbox面積比)に使用
+
+    # 検出ラベル(text_promptの語句と対応。トラックのラベルにこの文字列を含むものを使う。大小文字は無視)
+    # 同じラベルのトラックが複数ある場合はbbox面積が最大のものを使う
+    ground_label: "red ground"    # 地面追従に使うトラックのラベル
+    obstacle_label: "green pylon" # 回避対象トラックのラベル
+
+    # 地面の追従目標
+    ground_target_mode: "bbox_center"  # "bbox_center"=地面bboxの中心 / "mask_bottom"=地面マスクの下部(ロボットに近い側)の重心。曲がった通路ではmask_bottomが有利
+    ground_bottom_ratio: 0.3           # mask_bottom: 地面bboxの下からこの割合の高さの帯の画素を使う。↓で足元重視
+    ground_bottom_min_pixels: 200      # mask_bottom: 帯内の地面画素がこれ未満ならbbox中心にフォールバック
+
+    # 走行速度・操舵ゲイン
+    linear_speed: 0.5             # 通常走行時の並進速度(m/s)
+    kp_angular_ground: 0.003      # 地面追従: 目標位置の画面中心からのずれ(px)→角速度の比例ゲイン
+    kp_angular_avoid: 0.002       # 障害物回避: 寄せ残り(px)→角速度の比例ゲイン
+    max_angular_z: 0.6            # 角速度の上限(rad/s)。地面追従・回避の両方に適用。↓で回転を抑制
+
+    # 回避の開始・停止しきい値(障害物bboxの面積比)
+    avoid_area_ratio_slow: 0.20   # これ以上で回避(操舵+減速)を開始。未満なら無視して地面追従を継続
+    avoid_area_ratio_stop: 0.30   # これ以上で並進停止(その場で回頭のみ)
+
+    # 回避動作(画面端へ寄せて通過)
+    avoid_edge_target_ratio: 0.2  # 画面中央側のbbox端がこの割合(画面幅比)まで端に寄るまで旋回。↓で大きく避ける
+    avoid_done_margin_ratio: 0.05 # 寄せ完了のヒステリシス幅(画面幅比)。完了後この分ずれるまで旋回に戻らない
+    avoid_pass_speed_ratio: 0.5   # 寄せ完了後・消失後の通過中の速度比(linear_speedに対する)
+    avoid_hold_sec: 0.2           # 障害物が画角から消えた後、向きを保持して前進を続ける秒数
+    avoid_smooth_alpha: 0.4       # 障害物bbox端・面積の平滑化係数(0-1)。↓で滑らか(反応は遅れる)
+
+    # 見失い・通信断時の挙動
+    ground_lost_grace_sec: 0.7    # 地面が見えなくなっても直前の指令を維持する猶予(秒)。超えたら停止。↑で止まりにくいが、見失い時の停止が遅れる
+    tracks_timeout_sec: 0.5       # tracksがこの秒数届かなければ停止指令を出す(tracker停止・フレーム途絶対策)。0以下で無効
+
+    # 指令のスルーレート制限(ガタつき防止)
+    max_linear_accel: 0.5         # 並進速度の変化率上限(m/s^2)。↓で滑らか
+    max_angular_accel: 2.0        # 角速度の変化率上限(rad/s^2)

@@ -13,6 +13,7 @@
   <exec_depend>lang_sam_tracker</exec_depend>
   <exec_depend>lang_sam_client</exec_depend>
   <exec_depend>lang_sam_person_following</exec_depend>
+  <exec_depend>lang_sam_ground_nav</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
